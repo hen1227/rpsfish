@@ -1,0 +1,29 @@
+[package]
+name = "rpsfish"
+version = "0.1.0"
+edition = "2024"
+authors = ["Henry Abrahamsen"]
+description = "Deterministic search engine for RPS Strategy"
+license = "LGPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "rpsfish"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "rpsfish"
+path = "src/main.rs"
+
+[[bin]]
+name = "arena"
+path = "src/bin/arena.rs"
+
+[dependencies]
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+strip = "symbols"
