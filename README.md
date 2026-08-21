@@ -106,7 +106,11 @@ let callers provide earlier positions for threefold-repetition scoring. The
 frontend invokes it in a dedicated Web Worker, emits a snapshot after every
 completed depth, and accepts `maxDepth`, `maxNodes`, `maxTimeMs`, `variations`,
 and `throttleMs` limits. The browser boundary clamps requests to depth 127,
-100 million nodes, 120 seconds, and three variations. The shipped Deep preset
+100 million nodes, 120 seconds, and eight variations. Eight rather than three
+because the difficulty ladder is built on sampling among root moves, and the
+measured score range across the top eight is roughly triple the range across
+the top three — the extra lines are what let a weak profile play a plausible
+bad move rather than a random legal one. The shipped Deep preset
 now takes the full node allowance and stops on its 30-second budget instead:
 the engine reaches 20 million nodes in a few seconds, so the old cap was
 ending deep searches early and costing several plies.

@@ -559,6 +559,21 @@ Difficulty should remain deterministic and explainable:
 Node budgets are preferred for repeatable ratings. Wall-clock caps remain a
 second safety boundary on client devices.
 
+Status: the shipped ladder implements this in the web client rather than in the
+engine — profiles live in `frontend/engine/botProfiles.js` and the root sampler
+in `frontend/engine/botEngine.js`, over the ordinary MultiPV WASM entry point.
+Two consequences follow, and both are deliberate for now:
+
+- The engine exposes no difficulty ABI, so `MAX_VARIATIONS` in `wasm.rs` is the
+  ladder's real constraint on how wide a candidate set a weak profile can
+  sample. It is 8 rather than 3 for that reason.
+- `arena.rs` cannot measure the ladder, because the policy it would be
+  measuring is not in this crate. `frontend/scripts/botArena.mjs` fills that
+  gap with the same discipline — seeded, paired, colour-swapped, Elo with an
+  interval — driving the shipped worker and WASM. Moving the sampler into Rust
+  behind a seeded entry point would let one arena measure both, and would let a
+  native-server bot play at the same strength as the browser one.
+
 ## 16. Learned evaluation phase
 
 Learning begins only after deterministic self-play produces trustworthy games.

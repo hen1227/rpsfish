@@ -34,7 +34,13 @@ use crate::{
     AnalysisResult, Color, Mode, PieceKind, Position, SearchLimits, SearchStopReason, Searcher,
 };
 
-const MAX_VARIATIONS: usize = 3;
+// Eight rather than three because the bot ladder samples among root moves to
+// be weak, and three near-equivalent moves is not enough material to be weak
+// with. Measured top1-to-topN score gaps (600 random openings per mode, depths
+// 2-11) roughly triple going from three lines to eight, which is the range a
+// difficulty profile spends. Each line costs a full-window root search, so
+// callers that only want the best move should still ask for one.
+const MAX_VARIATIONS: usize = 8;
 const MAX_PV_LENGTH: usize = 127;
 
 #[link(wasm_import_module = "env")]
