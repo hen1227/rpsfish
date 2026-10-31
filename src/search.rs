@@ -24,14 +24,20 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::SQUARE_COUNT;
-use crate::board::{BLUE_TARGET_MASK, RED_TARGET_MASK};
 use crate::evaluation::{EvalParams, evaluate_with};
-use crate::model::{Color, GameOutcome, MAX_MOVES, Mode, Move, MoveList, PieceKind};
+use crate::model::{
+    Color, GameOutcome, Goal, MAX_MOVES, Mode, ModeRules, Move, MoveList, PieceKind,
+};
 use crate::position::{NO_PIECE, PIECE_CODES, Position};
 
 const INFINITY: i32 = 32_000;
-const MATE_SCORE: i32 = 30_000;
-const MATE_THRESHOLD: i32 = 29_000;
+/// The score of a win at the search root, decreasing by one per ply so a
+/// faster win outranks a slower one.
+pub const MATE_SCORE: i32 = 30_000;
+/// Scores at or beyond this magnitude are proven results rather than
+/// estimates, and carry a distance that has to be rebased whenever the ply
+/// they are measured from changes.
+pub const MATE_THRESHOLD: i32 = 29_000;
 const MAX_PLY: usize = 128;
 /// From/to pairs, the index space for both history and counter moves.
 const MOVE_SLOTS: usize = SQUARE_COUNT as usize * SQUARE_COUNT as usize;
@@ -122,21 +128,12 @@ const NULL_MIN_DEPTH: i16 = 3;
 /// the unit never drops below this.
 const MIN_PRUNING_UNIT: i32 = 60;
 
+/// Occurrences of one position that make a draw, where the rule applies.
+const REPETITION_THRESHOLD: usize = 3;
+
 /// How many quiet moves are searched before move-count pruning starts.
 const fn late_move_budget(depth: i16) -> usize {
     (3 + depth * depth) as usize
-}
-
-/// How search scores a side with no legal move.
-///
-/// `Draw` is the official rule in every current mode and matches the Go
-/// backend. The variant is retained so a future rule set can declare the
-/// opposite without a search rewrite, but nothing ships with `Loss`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum NoMoveOutcome {
-    Loss,
-    #[default]
-    Draw,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -164,6 +161,9 @@ pub enum SearchStopReason {
     Cancelled,
     TerminalPosition,
     Repetition,
+    /// The root has already run out QUIET_PLY_LIMIT moves with no capture, so
+    /// the game is drawn before the search begins.
+    NoCapture,
     NoLegalMove,
 }
 
@@ -233,8 +233,22 @@ pub struct Searcher {
     selective: bool,
     tuning: SearchTuning,
     reductions: Box<ReductionTable>,
-    no_move_outcome: NoMoveOutcome,
-    repetition_threshold: Option<u8>,
+    /// Whether the selective layer is licensed for the search now running.
+    ///
+    /// `selective` is what the caller asked for; this is that *and* a mode
+    /// whose rules the layer's assumptions hold in. Every pruning and reduction
+    /// below reads this rather than the setting, because a searcher reused
+    /// across modes -- which is what a session does -- must not carry one
+    /// mode's licence into another's position.
+    selective_now: bool,
+    /// The rules of the mode at the root, refreshed by `begin_search`.
+    ///
+    /// Two of them decide scores rather than moves -- whether a no-move node
+    /// is a draw or a loss, and whether a repeat is half a point -- and both
+    /// used to be search settings. They are read from the mode instead so that
+    /// one searcher reused across modes, which is what a session does, cannot
+    /// score one mode's position under another's rules.
+    mode_rules: ModeRules,
     history: Vec<i32>,
     /// The quiet reply that refuted each preceding move.
     ///
@@ -262,6 +276,14 @@ pub struct Searcher {
     /// Ply at which a null move was just made, so the reply cannot answer a
     /// pass with another pass. `usize::MAX` when no null move is in flight.
     null_ply: usize,
+    /// Root moves the current analysis is restricted to, empty for all of
+    /// them.
+    ///
+    /// Grading a played move means comparing it with the best move, and that
+    /// comparison is only honest when both numbers come out of the same
+    /// search: the same depth, the same window, the same table. Restricting
+    /// the root is how the played move gets that treatment.
+    root_filter: Vec<Move>,
     /// The scale of one unit of advantage in this mode, for pruning margins.
     pruning_unit: i32,
     /// Scratch move storage for the whole search tree.
@@ -292,8 +314,8 @@ impl Searcher {
             selective: true,
             tuning: SearchTuning::DEFAULT,
             reductions: build_reductions(SearchTuning::DEFAULT.reduction_scale),
-            no_move_outcome: NoMoveOutcome::Draw,
-            repetition_threshold: Some(3),
+            selective_now: true,
+            mode_rules: Mode::TotalWar.rules(),
             history: vec![0; HISTORY_SIZE],
             counters: vec![Move::NONE; MOVE_SLOTS],
             killers: [[Move::NONE; 2]; MAX_PLY],
@@ -303,6 +325,7 @@ impl Searcher {
             path_root: 0,
             prior_sorted: Vec::new(),
             null_ply: usize::MAX,
+            root_filter: Vec::new(),
             pruning_unit: MIN_PRUNING_UNIT,
             moves: Vec::with_capacity((MAX_PLY + 2) * MAX_MOVES),
             stats: SearchStats::default(),
@@ -357,23 +380,6 @@ impl Searcher {
         &self.tuning
     }
 
-    /// Override how a side with no legal move is scored.
-    ///
-    /// Defaults to the official `Draw`. Selecting `Loss` also disables the
-    /// rule-derived bounds, because they depend on this rule: if being
-    /// immobilized were a loss, owning an uncapturable piece would no longer
-    /// guarantee at least a draw and the bounds would be unsound.
-    pub fn set_no_move_outcome(&mut self, outcome: NoMoveOutcome) {
-        self.no_move_outcome = outcome;
-        if outcome == NoMoveOutcome::Loss {
-            self.rule_proofs = false;
-        }
-    }
-
-    pub fn set_repetition_threshold(&mut self, threshold: Option<u8>) {
-        self.repetition_threshold = threshold.filter(|&value| value >= 2);
-    }
-
     pub fn clear(&mut self) {
         self.table.clear();
         self.history.fill(0);
@@ -421,6 +427,19 @@ impl Searcher {
                 0,
                 0,
                 SearchStopReason::Repetition,
+                Vec::new(),
+            );
+        }
+        // After the terminal test and the repetition test, never before: this
+        // is the weakest of the three claims about a position, and a root that
+        // is won or blockaded is that instead. See `Position::adjudicate`.
+        if position.quiet_limit_reached() && position.has_any_legal_move(position.side_to_move()) {
+            return self.finish_result(
+                started,
+                None,
+                0,
+                0,
+                SearchStopReason::NoCapture,
                 Vec::new(),
             );
         }
@@ -528,6 +547,62 @@ impl Searcher {
         variations: usize,
         prior_hashes: &[u64],
         cancellation: Option<&AtomicBool>,
+        on_update: F,
+    ) -> AnalysisResult
+    where
+        F: FnMut(&AnalysisUpdate),
+    {
+        self.analyze_inner(
+            position,
+            limits,
+            variations,
+            prior_hashes,
+            &[],
+            cancellation,
+            on_update,
+        )
+    }
+
+    /// Score only the given root moves, everything else held identical.
+    ///
+    /// This exists for review: the loss a move cost its player is the
+    /// difference between the best move's score and that move's score, and
+    /// subtracting two numbers is only meaningful when they were produced the
+    /// same way. Searching the child position instead would measure the move
+    /// one ply deeper than the alternative it is being compared with.
+    ///
+    /// Returns `SearchStopReason::NoLegalMove` with no lines when none of the
+    /// requested moves is legal here, which is the caller's signal that it
+    /// asked about a move this position does not have.
+    #[must_use]
+    pub fn analyze_root_moves(
+        &mut self,
+        position: Position,
+        limits: SearchLimits,
+        variations: usize,
+        prior_hashes: &[u64],
+        root_moves: &[Move],
+    ) -> AnalysisResult {
+        self.analyze_inner(
+            position,
+            limits,
+            variations,
+            prior_hashes,
+            root_moves,
+            None,
+            |_| {},
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn analyze_inner<F>(
+        &mut self,
+        position: Position,
+        limits: SearchLimits,
+        variations: usize,
+        prior_hashes: &[u64],
+        root_moves: &[Move],
+        cancellation: Option<&AtomicBool>,
         mut on_update: F,
     ) -> AnalysisResult
     where
@@ -561,9 +636,19 @@ impl Searcher {
                 SearchStopReason::Repetition,
             );
         }
+        if position.quiet_limit_reached() && position.has_any_legal_move(position.side_to_move()) {
+            return self.finish_analysis(
+                started,
+                Vec::new(),
+                0,
+                0,
+                100,
+                SearchStopReason::NoCapture,
+            );
+        }
 
-        let root_moves = position.legal_moves();
-        if root_moves.is_empty() {
+        let legal_moves = position.legal_moves();
+        if legal_moves.is_empty() {
             return self.finish_analysis(
                 started,
                 Vec::new(),
@@ -573,9 +658,32 @@ impl Searcher {
                 SearchStopReason::NoLegalMove,
             );
         }
+        self.root_filter = root_moves
+            .iter()
+            .copied()
+            .filter(|movement| legal_moves.as_slice().contains(movement))
+            .collect();
+        if !root_moves.is_empty() && self.root_filter.is_empty() {
+            return self.finish_analysis(
+                started,
+                Vec::new(),
+                self.no_move_score(0),
+                0,
+                100,
+                SearchStopReason::NoLegalMove,
+            );
+        }
+        let root_count = if self.root_filter.is_empty() {
+            legal_moves.len()
+        } else {
+            self.root_filter.len()
+        };
 
-        let requested_variations = variations.max(1).min(root_moves.len());
-        let mut best_lines = self.fallback_analysis_lines(position, &root_moves);
+        let requested_variations = variations.max(1).min(root_count);
+        let mut best_lines = self.fallback_analysis_lines(position, &legal_moves);
+        if !self.root_filter.is_empty() {
+            best_lines.retain(|line| self.root_filter.contains(&line.movement));
+        }
         best_lines.truncate(requested_variations);
         let mut completed_depth = 0_u8;
         let mut confidence = 0_u8;
@@ -583,8 +691,14 @@ impl Searcher {
         let mut previous_score = None;
         let mut stable_iterations = 0_u8;
 
+        // A restricted root always takes the MultiPV path, whose first move
+        // is searched with a full window. That is exactly how the full search
+        // scored the best move, and comparability is the whole reason the
+        // restriction exists — the aspirated single-line path would answer a
+        // different question with a narrower window.
+        let single_line = requested_variations == 1 && self.root_filter.is_empty();
         for depth in 1..=limits.max_depth.max(1) {
-            let mut lines = if requested_variations == 1 {
+            let mut lines = if single_line {
                 let Some((movement, score)) =
                     self.search_root_aspirated(position, depth, previous_score, &control)
                 else {
@@ -635,6 +749,7 @@ impl Searcher {
             .first()
             .map_or_else(|| self.leaf_score(&position), |line| line.score);
         let reason = self.stop_reason.unwrap_or(SearchStopReason::DepthLimit);
+        self.root_filter.clear();
         self.finish_analysis(
             started,
             best_lines,
@@ -647,6 +762,12 @@ impl Searcher {
 
     fn begin_search(&mut self, prior_hashes: &[u64], root: &Position) {
         let root_hash = root.hash();
+        self.mode_rules = root.mode().rules();
+        // Corner races are sensitive to forced moves and distant blockades.
+        // More aggressive reductions and aspiration searches were tested here
+        // but lost strength and missed forced losses. Keep the conservative
+        // search in modes where stalemate loses.
+        self.selective_now = self.selective && !self.mode_rules.stalemate_loses;
         self.pruning_unit = self.material_weight(root.mode()).max(MIN_PRUNING_UNIT);
         self.null_ply = usize::MAX;
         self.stats = SearchStats::default();
@@ -661,6 +782,7 @@ impl Searcher {
         self.prior_sorted.extend_from_slice(prior_hashes);
         self.prior_sorted.sort_unstable();
         self.moves.clear();
+        self.root_filter.clear();
         self.path_moves[0] = Move::NONE;
         // History is intentionally aged instead of reset between searches so
         // repeated games can retain useful ordering without unbounded values.
@@ -746,11 +868,12 @@ impl Searcher {
         if !self.enter_node(control, 0) {
             return None;
         }
-        let root_key = position.hash();
+        let root_key = transposition_key(&position);
         let tt_move = self
             .probe(root_key)
             .map_or(Move::NONE, |entry| entry.best_move);
         let (base, end, _) = self.stage_moves(&position, tt_move, 0);
+        let end = self.restrict_root(base, end);
         let wanted = variations.clamp(1, end - base);
         let mut lines = Vec::with_capacity(wanted);
 
@@ -814,7 +937,11 @@ impl Searcher {
 
             self.moves.swap(range_base, best_offset);
             let movement = self.moves[range_base].movement;
-            if pv_index == 0 {
+            // A restricted root did not consider every move, so its verdict
+            // is not this position's verdict and must not be stored under
+            // this position's key. Sub-tree entries are unaffected: they were
+            // searched in full.
+            if pv_index == 0 && self.root_filter.is_empty() {
                 // Recording the overall best move first is what orders the
                 // next depth's first pass.
                 self.table.store(TTEntry::new(
@@ -856,7 +983,7 @@ impl Searcher {
         previous_score: Option<i32>,
         control: &SearchControl<'_>,
     ) -> Option<(Move, i32)> {
-        let Some(centre) = previous_score.filter(|_| self.selective && depth >= 4) else {
+        let Some(centre) = previous_score.filter(|_| self.selective_now && depth >= 4) else {
             return self.search_root(position, depth, -INFINITY, INFINITY, control);
         };
         if centre.abs() >= MATE_THRESHOLD {
@@ -889,11 +1016,12 @@ impl Searcher {
         if !self.enter_node(control, 0) {
             return None;
         }
-        let root_key = position.hash();
+        let root_key = transposition_key(&position);
         let tt_move = self
             .probe(root_key)
             .map_or(Move::NONE, |entry| entry.best_move);
         let (base, end, _) = self.stage_moves(&position, tt_move, 0);
+        let end = self.restrict_root(base, end);
 
         let original_alpha = alpha;
         let mut best_move = Move::NONE;
@@ -960,14 +1088,16 @@ impl Searcher {
         } else {
             Bound::Exact
         };
-        self.table.store(TTEntry::new(
-            root_key,
-            score_to_tt(best_score, 0),
-            i16::from(depth),
-            bound,
-            best_move,
-            self.generation,
-        ));
+        if self.root_filter.is_empty() {
+            self.table.store(TTEntry::new(
+                root_key,
+                score_to_tt(best_score, 0),
+                i16::from(depth),
+                bound,
+                best_move,
+                self.generation,
+            ));
+        }
         Some((best_move, best_score))
     }
 
@@ -995,11 +1125,35 @@ impl Searcher {
         if self.is_repetition(position.hash()) {
             return 0;
         }
+        // Last of the three, and it costs a move generation only on the rare
+        // node that got this far: a hundredth quiet move that also blockades
+        // the opponent is a win in a mode where being stuck loses, not a draw.
+        if position.quiet_limit_reached() {
+            return if position.has_any_legal_move(position.side_to_move()) {
+                0
+            } else {
+                self.no_move_score(ply)
+            };
+        }
         if ply >= MAX_PLY - 1 {
             return self.leaf_score(position);
         }
 
-        let key = position.hash();
+        let corner_race = self.mode_rules.goal == Goal::EnemyCorner;
+        if corner_race && position.goal_move_for(position.side_to_move()).is_some() {
+            return MATE_SCORE - ply_i32(ply + 1);
+        }
+        let must_defend = corner_race
+            && position
+                .goal_move_for(position.side_to_move().other())
+                .is_some();
+        if self.rule_proofs
+            && let Some(value) = crate::endgame::probe(position)
+        {
+            return endgame_score(value, ply);
+        }
+
+        let key = transposition_key(position);
         let original_alpha = alpha;
         let mut tt_move = Move::NONE;
         if let Some(entry) = self.probe(key) {
@@ -1023,7 +1177,7 @@ impl Searcher {
         // is what licenses the selective layer below. Principal-variation
         // nodes are searched exactly.
         let narrow = beta - alpha <= 1;
-        let selective = self.selective && narrow && beta.abs() < MATE_THRESHOLD;
+        let selective = self.selective_now && !must_defend && narrow && beta.abs() < MATE_THRESHOLD;
         let mut static_eval = 0_i32;
         if selective {
             static_eval = self.leaf_score(position);
@@ -1040,6 +1194,14 @@ impl Searcher {
             // holds, the real moves do not need a full-depth search. A side
             // down to its last piece is excluded, because there a forced move
             // really can be worse than passing.
+            //
+            // And a mode where being unable to move loses is excluded outright:
+            // that rule is zugzwang everywhere rather than only at one piece,
+            // because a side whose every move walks into a capture and a side
+            // with no move at all are both lost, and both would be saved by a
+            // pass. This is what `selective_search_agrees_with_exhaustive_
+            // search_on_forced_positions` catches when the guard is removed --
+            // a forced loss came back as a small plus.
             if depth >= NULL_MIN_DEPTH
                 && self.null_ply != ply
                 && static_eval >= beta
@@ -1075,7 +1237,7 @@ impl Searcher {
         // this node is guesswork, so a deep search of it is likely wasted.
         // Searching one ply shallower fills the table and the next visit is
         // ordered properly.
-        if self.selective && tt_move.is_none() && depth >= 4 {
+        if self.selective_now && !must_defend && tt_move.is_none() && depth >= 4 {
             depth -= 1;
         }
 
@@ -1120,7 +1282,13 @@ impl Searcher {
             let mut score = if move_index == 0 {
                 -self.negamax(position, depth - 1, -beta, -alpha, ply + 1, control)
             } else {
-                let reduced_depth = depth - 1 - self.reduction(depth, move_index, quiet, narrow);
+                let reduced_depth = depth
+                    - 1
+                    - if !must_defend {
+                        self.reduction(depth, move_index, quiet, narrow)
+                    } else {
+                        0
+                    };
                 let mut candidate = -self.negamax(
                     position,
                     reduced_depth,
@@ -1223,18 +1391,44 @@ impl Searcher {
         if !position.has_any_legal_move(position.side_to_move()) {
             return self.no_move_score(ply);
         }
-
-        let stand_pat = self.leaf_score(position);
-        if stand_pat >= beta {
-            return stand_pat;
+        // Below the stalemate test for the same reason it is below it above.
+        if position.quiet_limit_reached() {
+            return 0;
         }
-        alpha = alpha.max(stand_pat);
+
+        if self.rule_proofs
+            && let Some(value) = crate::endgame::probe(position)
+        {
+            return endgame_score(value, ply);
+        }
+
+        let us = position.side_to_move();
+        let corner_race = self.mode_rules.goal == Goal::EnemyCorner;
+        if corner_race && position.goal_move_for(us).is_some() {
+            return MATE_SCORE - ply_i32(ply + 1);
+        }
+        // A threat of arrival is this game's check. Passing is not an option:
+        // search the quiet corner plugs as well as captures of the runner.
+        // The next node recognizes any unanswered threat as a win in one.
+        let must_defend = corner_race && position.goal_move_for(us.other()).is_some();
+        let stand_pat = self.leaf_score(position);
+        if !must_defend {
+            if stand_pat >= beta {
+                return stand_pat;
+            }
+            alpha = alpha.max(stand_pat);
+        }
 
         // Delta pruning: when even winning the best available piece cannot
         // reach alpha, the remaining captures are noise.
-        let hopeless = self.selective && stand_pat + self.pruning_unit * 2 <= alpha;
+        let hopeless =
+            !must_defend && self.selective_now && stand_pat + self.pruning_unit * 2 <= alpha;
 
-        let (base, end, context) = self.stage_tactical_moves(position, ply);
+        let (base, end, context) = if must_defend {
+            self.stage_moves(position, Move::NONE, ply)
+        } else {
+            self.stage_tactical_moves(position, ply)
+        };
         for move_index in 0..end - base {
             let movement = self.staged_move(base, move_index, end);
             if hopeless && context.is_quiet_capture(position, movement) {
@@ -1389,7 +1583,7 @@ impl Searcher {
     /// only if the short search beats alpha, so a reduction that is too large
     /// costs a re-search rather than correctness.
     fn reduction(&self, depth: i16, move_index: usize, quiet: bool, narrow: bool) -> i16 {
-        if !self.selective {
+        if !self.selective_now {
             // The original timid rule, kept as the control arm.
             return i16::from(quiet && depth >= 3 && move_index >= 4);
         }
@@ -1410,6 +1604,28 @@ impl Searcher {
             reduction -= 1;
         }
         reduction.clamp(0, depth - 2)
+    }
+
+    /// Narrow a staged root range to `root_filter`, returning the new end.
+    ///
+    /// The kept moves are compacted to the front of the range so every
+    /// ordering helper below works unchanged; each entry keeps its own
+    /// generation order, so ties still break the way they would have.
+    fn restrict_root(&mut self, base: usize, end: usize) -> usize {
+        if self.root_filter.is_empty() {
+            return end;
+        }
+        let filter = core::mem::take(&mut self.root_filter);
+        let mut kept = base;
+        for index in base..end {
+            if filter.contains(&self.moves[index].movement) {
+                self.moves.swap(kept, index);
+                kept += 1;
+            }
+        }
+        self.moves.truncate(kept);
+        self.root_filter = filter;
+        kept
     }
 
     /// Put the arena range in the order search should try it.
@@ -1518,24 +1734,26 @@ impl Searcher {
         }
     }
 
-    /// The heuristic score of a leaf, clamped to what the rules already prove.
-    ///
-    /// See [`proof_bounds`]. Clamping at the leaf is enough for the bound to
-    /// hold at every ancestor, because a side that owns an uncapturable piece
-    /// owns one in every descendant position: extinction never reverses.
     /// What one piece is worth in this mode, as the scale for margins.
     ///
     /// Pruning margins have to be expressed in the same units as evaluation,
     /// and those units differ by an order of magnitude between modes, so the
     /// weights supply the scale rather than a hard-coded centipawn.
     const fn material_weight(&self, mode: Mode) -> i32 {
-        match mode {
-            Mode::Annihilation => self.eval_params.annihilation_material,
-            Mode::TotalWar => self.eval_params.total_war_material,
-            Mode::Infiltration => self.eval_params.infiltration_material,
-        }
+        self.eval_params.material(mode)
     }
 
+    /// The heuristic score of a leaf, clamped to what the rules already prove.
+    ///
+    /// See [`proof_bounds`]. Clamping at the leaf is enough for the bound to
+    /// hold at every ancestor, because both halves of every licence are
+    /// inherited: a side that owns an uncapturable piece owns one in every
+    /// descendant position, since extinction never reverses, and a tile count
+    /// that already matches everything the enemy can still come to own still
+    /// matches it after any claim. Terminal nodes are scored before this is
+    /// reached, so the clamp can never hide a proven mate -- and it never needs
+    /// to, because no terminal in the subtree is a loss for the guaranteed
+    /// side.
     fn leaf_score(&self, position: &Position) -> i32 {
         let score = evaluate_with(position, &self.eval_params);
         if !self.rule_proofs {
@@ -1548,10 +1766,10 @@ impl Searcher {
     }
 
     fn is_repetition(&self, hash: u64) -> bool {
-        let Some(threshold) = self.repetition_threshold else {
+        if !self.mode_rules.repetition_draws {
             return false;
-        };
-        let threshold = usize::from(threshold);
+        }
+        let threshold = REPETITION_THRESHOLD;
         // Two exact restrictions, not approximations. Only the reversible run
         // can hold a repetition, because a capture or a claim can never be
         // undone. And within the plies search made, sides alternate, so only
@@ -1590,10 +1808,13 @@ impl Searcher {
         end - start
     }
 
+    /// What a node whose side has no legal move is worth, from that side's
+    /// point of view. The mode decides; see `ModeRules::stalemate_loses`.
     fn no_move_score(&self, ply: usize) -> i32 {
-        match self.no_move_outcome {
-            NoMoveOutcome::Loss => -MATE_SCORE + ply_i32(ply),
-            NoMoveOutcome::Draw => 0,
+        if self.mode_rules.stalemate_loses {
+            -MATE_SCORE + ply_i32(ply)
+        } else {
+            0
         }
     }
 
@@ -1605,7 +1826,7 @@ impl Searcher {
                 break;
             }
             seen.push(position.hash());
-            let Some(entry) = self.table.probe(position.hash()) else {
+            let Some(entry) = self.table.probe(transposition_key(&position)) else {
                 break;
             };
             if entry.best_move.is_none() || !position.is_legal_move(entry.best_move) {
@@ -1654,8 +1875,10 @@ struct OrderContext {
     claim_mask: u128,
     /// The last unclaimed tile, which is the only claim that decides a game.
     last_claim_mask: u128,
-    /// Sign of forward progress for the side to move, or zero.
-    advance: i32,
+    /// The shape the side to move is running at, for scoring progress.
+    goal: Goal,
+    /// Whether anything is won by arriving, so progress is worth scoring.
+    advances: bool,
 }
 
 impl OrderContext {
@@ -1684,14 +1907,7 @@ impl OrderContext {
             capture_bonus[them.index() * 3 + kind.index()] = bonus;
         }
 
-        let goal_mask = if rules.uses_boundary_goal {
-            match us {
-                Color::Red => RED_TARGET_MASK,
-                Color::Blue => BLUE_TARGET_MASK,
-            }
-        } else {
-            0
-        };
+        let goal_mask = rules.goal.mask(us);
         let claim_mask = if position.mode() == Mode::TotalWar {
             position.neutral_territory()
         } else {
@@ -1710,11 +1926,8 @@ impl OrderContext {
             } else {
                 0
             },
-            advance: match (rules.uses_boundary_goal, us) {
-                (false, _) => 0,
-                (true, Color::Red) => 1,
-                (true, Color::Blue) => -1,
-            },
+            goal: rules.goal,
+            advances: rules.goal.is_some(),
         }
     }
 
@@ -1739,9 +1952,18 @@ impl OrderContext {
             score += 70_000;
         }
         score += history[history_index(self.color, movement)];
-        if self.advance != 0 {
-            let progress = i32::from(movement.from().y()) - i32::from(to.y());
-            score += progress * self.advance * 1_000;
+        if self.advances {
+            // Moves closer to the goal, by the goal's own distance. Against a
+            // rank this is the rank change the old signed-`y` term computed;
+            // against a corner it is the Chebyshev step, which is the only one
+            // of the two that knows a sideways shuffle along the back rank
+            // gains nothing. Ordering, so a wrong answer costs nodes and never
+            // correctness -- but a corner race ordered by rank sends the
+            // search up the wrong edge first, and that costs a lot of nodes.
+            let index = usize::from(movement.from().index());
+            let progress = self.goal.distance(self.color, index)
+                - self.goal.distance(self.color, usize::from(to.index()));
+            score += progress * 1_000;
         }
         score
     }
@@ -1939,6 +2161,31 @@ fn previous_power_of_two(value: usize) -> usize {
     }
 }
 
+/// Repetition and books identify a board; a search bound also depends on how
+/// many quiet plies remain. Reusing a fresh position's score at ply 199 can
+/// turn a forced draw into a fictitious win. Far from the limit no search can
+/// reach it (even quiescence stops before MAX_PLY), so those clocks share a
+/// key. Inside that horizon, retain the exact counter. This keeps ordinary
+/// transpositions useful without borrowing a result across a possible draw.
+const fn transposition_key(position: &Position) -> u64 {
+    // This policy is part of the measured corner-search change. The other
+    // modes retain their existing table policy and independently tuned search.
+    if !matches!(position.mode().rules().goal, Goal::EnemyCorner) {
+        return position.hash();
+    }
+    let horizon = crate::model::QUIET_PLY_LIMIT - MAX_PLY as u16;
+    let clock = position.quiet_plies().saturating_sub(horizon);
+    position.hash() ^ (clock as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+}
+
+fn endgame_score(value: i16, ply: usize) -> i32 {
+    match value.cmp(&0) {
+        std::cmp::Ordering::Greater => MATE_SCORE - ply_i32(ply) - i32::from(value) + 1,
+        std::cmp::Ordering::Less => -MATE_SCORE + ply_i32(ply) - i32::from(value) - 1,
+        std::cmp::Ordering::Equal => 0,
+    }
+}
+
 const fn move_slot(movement: Move) -> usize {
     movement.from().index() as usize * SQUARE_COUNT as usize + movement.to().index() as usize
 }
@@ -1982,18 +2229,61 @@ fn analysis_confidence(depth: u8, stable_iterations: u8, score_delta: u32, score
         .min(99)
 }
 
+/// Whether the rules alone already guarantee `color` at least a draw.
+///
+/// Two disjoint licences, both read off [`ModeRules`] rather than off a
+/// [`Mode`], so a mode added later cannot inherit either by accident:
+///
+/// - Annihilation is the *only* loss condition. Then an uncapturable piece is
+///   the whole proof. `Position::is_immortal_kind` is a theorem -- the capture
+///   hierarchy is one 3-cycle and no mode returns a piece to the board -- so
+///   the owner's piece count can never reach zero, and stalemate and
+///   repetition are draws.
+/// - A territory deficit on a filled board is the only *other* loss condition.
+///   Then both doors have to be shut at once. The uncapturable piece shuts
+///   annihilation. A tile count that already matches everything the enemy can
+///   still come to own shuts territory, and it stays shut: a claim either adds
+///   to our count or moves a tile out of `neutral` and into theirs, which
+///   leaves `theirs + neutral` exactly where it was. So the inequality is
+///   inherited by every descendant and can never be repaired.
+///
+/// This proves "cannot lose" and never "wins". A majority can go uncashed: an
+/// uncapturable piece can still be walled in by pieces it does not prey on,
+/// and a stalemate or a repetition ends the game at zero with neutral tiles
+/// still on the board.
+#[must_use]
+fn is_guaranteed_at_least_a_draw(position: &Position, rules: ModeRules, color: Color) -> bool {
+    if rules.immortality_prevents_loss() {
+        return position.has_immortal_piece(color);
+    }
+    if rules.territory_majority_prevents_loss() {
+        // The tile counts are three array reads and come first deliberately:
+        // on all but a handful of leaves nobody holds an unbeatable count, and
+        // then the scan for an uncapturable piece never runs at all.
+        //
+        // `>=` rather than `>`, because a level fill is a draw and a draw is
+        // not a loss. On this board that is theoretical -- 81 is odd, so the
+        // test is `territory_count(color) >= 41` and equality is unreachable.
+        return position.territory_count(color)
+            >= position.territory_count(color.other()) + position.neutral_territory_count()
+            && position.has_immortal_piece(color);
+    }
+    false
+}
+
 /// Whether the rules already decide this position as a draw.
 ///
-/// When annihilation is a mode's only loss condition and stalemate is a draw,
-/// a side holding an uncapturable piece cannot lose. If both sides hold one,
-/// neither can lose, the state space is finite, and repetition is a draw, so
-/// the game value is exactly zero. This is a proof, not a heuristic, and it
-/// prunes the entire subtree.
+/// When neither side can lose, the state space is finite and repetition is a
+/// draw, so the game value is exactly zero. This is a proof, not a heuristic,
+/// and it prunes the entire subtree.
+///
+/// Only mutual immortality reaches it. Two territory guarantees cannot hold at
+/// once: each needs more than half the board and there is only one board.
 #[must_use]
 fn is_proven_draw(position: &Position) -> bool {
-    position.mode().rules().immortality_prevents_loss()
-        && position.has_immortal_piece(Color::Red)
-        && position.has_immortal_piece(Color::Blue)
+    let rules = position.mode().rules();
+    is_guaranteed_at_least_a_draw(position, rules, Color::Red)
+        && is_guaranteed_at_least_a_draw(position, rules, Color::Blue)
 }
 
 /// Score bounds implied by the rules alone, from the side-to-move view.
@@ -2001,12 +2291,15 @@ fn is_proven_draw(position: &Position) -> bool {
 /// Returns `None` when the rules prove nothing, which is the common case.
 #[must_use]
 fn proof_bounds(position: &Position) -> Option<(i32, i32)> {
-    if !position.mode().rules().immortality_prevents_loss() {
+    let rules = position.mode().rules();
+    if !rules.immortality_prevents_loss() && !rules.territory_majority_prevents_loss() {
+        // No rule set here licenses a bound, so this stays one branch ahead of
+        // anything that reads the board.
         return None;
     }
     let us = position.side_to_move();
-    let we_are_safe = position.has_immortal_piece(us);
-    let they_are_safe = position.has_immortal_piece(us.other());
+    let we_are_safe = is_guaranteed_at_least_a_draw(position, rules, us);
+    let they_are_safe = is_guaranteed_at_least_a_draw(position, rules, us.other());
     match (we_are_safe, they_are_safe) {
         (true, true) => Some((0, 0)),
         (true, false) => Some((0, INFINITY)),
@@ -2052,13 +2345,110 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     use crate::evaluation::{EvalParams, evaluate_with};
-    use crate::model::{Color, Mode};
+    use crate::model::{Color, EndReason, Mode, Move, QUIET_PLY_LIMIT, Square};
     use crate::position::Position;
 
     use super::{
-        NoMoveOutcome, SearchLimits, SearchStopReason, Searcher, build_reductions,
-        previous_power_of_two,
+        SearchLimits, SearchStopReason, Searcher, build_reductions, previous_power_of_two,
+        proof_bounds,
     };
+
+    /// A Total War board where Red holds an unbeatable tile count.
+    ///
+    /// Red's lone Rock is the whole army. Blue's pieces are Scissors, which
+    /// Rock preys on and which cannot prey on Rock, so as long as Blue owns no
+    /// Paper the Rock can never be captured and Red can never be annihilated.
+    /// The tile split is the parameter, so one caller can straddle the
+    /// majority and another can break the conjunction.
+    fn total_war_majority(board: &str, territory: &str) -> Position {
+        Position::from_fen(Mode::TotalWar, &format!("{board} r {territory}"))
+            .expect("position must parse")
+    }
+
+    const EIGHT_SCISSORS_AND_A_LONE_ROCK: &str = "SSSSSSSS1/9/9/9/r8/9/9/9/9";
+    const RED_HOLDS_FORTY_ONE: &str =
+        "rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrr4/bbbbbbbbb/bbbbbbbbb/bbbbbbbbb/bbb6";
+    const RED_HOLDS_FORTY: &str =
+        "rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrr5/bbbbbbbbb/bbbbbbbbb/bbbbbbbbb/bbbb5";
+
+    #[test]
+    fn a_permanent_territory_majority_with_an_immortal_piece_is_never_scored_as_losing() {
+        // Forty-one tiles cannot be beaten by any split of the remaining ten,
+        // and the lone Rock cannot be captured, so both of Total War's loss
+        // conditions are shut and the worst Red can do is draw.
+        let position = total_war_majority(EIGHT_SCISSORS_AND_A_LONE_ROCK, RED_HOLDS_FORTY_ONE);
+        assert_eq!(position.territory_count(Color::Red), 41);
+        assert_eq!(position.territory_count(Color::Blue), 30);
+        assert_eq!(position.neutral_territory_count(), 10);
+        assert!(position.has_immortal_piece(Color::Red));
+        assert!(
+            evaluate_with(&position, &EvalParams::DEFAULT) < 0,
+            "the raw heuristic must dislike this position for the clamp to matter"
+        );
+
+        let mut searcher = Searcher::new(1);
+        let result = searcher.search(position, depth(4));
+        assert!(
+            result.score >= 0,
+            "search returned {} for a provably unloseable position",
+            result.score
+        );
+    }
+
+    #[test]
+    fn one_tile_short_of_a_majority_gets_no_bound() {
+        // The boundary test, and the one that catches an off-by-one between
+        // `>` and `>=`: forty tiles against thirty-one and ten neutral is
+        // exactly one claim away from unbeatable, and until that claim lands
+        // Blue can still reach forty-one.
+        let position = total_war_majority(EIGHT_SCISSORS_AND_A_LONE_ROCK, RED_HOLDS_FORTY);
+        assert_eq!(position.territory_count(Color::Red), 40);
+        assert_eq!(position.territory_count(Color::Blue), 31);
+        assert_eq!(position.neutral_territory_count(), 10);
+        assert!(position.has_immortal_piece(Color::Red));
+        assert_eq!(proof_bounds(&position), None);
+    }
+
+    #[test]
+    fn a_territory_majority_without_an_immortal_piece_gets_no_bound() {
+        // The other half of the conjunction. One Blue Paper is enough to hunt
+        // the Rock forever, so the tile count buys nothing -- this is the
+        // suite's whole `race-*` family in miniature, where Red holds up to
+        // sixty-four tiles and still loses.
+        let position = total_war_majority("PSSSSSSS1/9/9/9/r8/9/9/9/9", RED_HOLDS_FORTY_ONE);
+        assert_eq!(position.territory_count(Color::Red), 41);
+        assert!(!position.has_immortal_piece(Color::Red));
+        assert_eq!(proof_bounds(&position), None);
+    }
+
+    #[test]
+    fn the_territory_bound_is_symmetric_under_mirroring() {
+        // `mirrored` swaps the colours *and* the side to move, so a bound
+        // stated from the mover's view must come back literally equal. This is
+        // the test that catches reading the wrong colour's tile count.
+        for territory in [RED_HOLDS_FORTY_ONE, RED_HOLDS_FORTY] {
+            for board in [EIGHT_SCISSORS_AND_A_LONE_ROCK, "PSSSSSSS1/9/9/9/r8/9/9/9/9"] {
+                let position = total_war_majority(board, territory);
+                assert_eq!(
+                    proof_bounds(&position),
+                    proof_bounds(&position.mirrored()),
+                    "bound differs under mirroring"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn two_territory_guarantees_cannot_hold_at_once() {
+        // Why `is_proven_draw`'s exact-zero arm stays unreachable in Total
+        // War: both sides would need more than half of one board.
+        let position = total_war_majority(EIGHT_SCISSORS_AND_A_LONE_ROCK, RED_HOLDS_FORTY_ONE);
+        let red = position.territory_count(Color::Red);
+        let blue = position.territory_count(Color::Blue);
+        let neutral = position.neutral_territory_count();
+        assert!(red >= blue + neutral);
+        assert!(blue < red + neutral);
+    }
 
     fn depth(depth: u8) -> SearchLimits {
         SearchLimits {
@@ -2066,6 +2456,78 @@ mod tests {
             max_nodes: None,
             move_time: None,
         }
+    }
+
+    fn corner_quiescence(fen: &str, alpha: i32, beta: i32) -> i32 {
+        let mut position = Position::from_fen(Mode::Intransitive, fen).unwrap();
+        let mut searcher = Searcher::new(1);
+        searcher.set_rule_proofs(false); // exercise the search, independently of the tablebase
+        searcher.begin_search(&[], &position);
+        let control = super::SearchControl {
+            deadline: None,
+            max_nodes: Some(20_000),
+            cancellation: None,
+        };
+        let result = searcher.quiescence(&mut position, alpha, beta, 0, &control);
+        assert!(searcher.stop_reason.is_none());
+        result
+    }
+
+    #[test]
+    fn a_goal_win_precedes_stand_pat_even_in_a_narrow_window() {
+        // Rock captures into a1. The Paper on a2 attacks that square, but
+        // arrival wins before it can recapture.
+        let fen = "S8/Pp7/9/9/9/9/9/9/9 r";
+        // Paper cannot capture Scissors; switch the runner to Rock.
+        let fen = fen.replace("Pp", "Pr");
+        assert_eq!(corner_quiescence(&fen, -1001, -1000), super::MATE_SCORE - 1);
+    }
+
+    #[test]
+    fn quiescence_searches_a_quiet_corner_plug() {
+        // Neither Scissors can take the other. Red must step h9-i9 to stop
+        // S h8-i9. Capture-only quiescence cannot see this defense.
+        let fen = "9/9/9/9/9/9/9/7S1/7s1 r";
+        let score = corner_quiescence(fen, -super::INFINITY, super::INFINITY);
+        assert!(score.abs() < super::MATE_THRESHOLD, "{score}");
+        let position = Position::from_fen(Mode::Intransitive, fen).unwrap();
+        let result = Searcher::new(1).search(position, depth(1));
+        assert_eq!(result.best_move.unwrap().notation(), "h9-i9");
+    }
+
+    #[test]
+    fn an_unanswerable_corner_threat_is_a_loss_at_the_horizon() {
+        // A Rock plug is no defense against Paper. Remote extra material
+        // cannot buy a pass, even if the static score clears beta.
+        let fen = "9/9/9/3rr4/3r5/9/9/7P1/7r1 r";
+        assert_eq!(
+            corner_quiescence(fen, -super::INFINITY, super::INFINITY),
+            -super::MATE_SCORE + 2,
+        );
+        assert!(corner_quiescence(fen, -101, -100) <= -100);
+    }
+
+    #[test]
+    fn transpositions_respect_the_no_capture_clock() {
+        let fresh = Position::from_fen(Mode::Intransitive, "9/9/9/9/4r1R2/9/9/9/9 r").unwrap();
+        let mut old = fresh;
+        for _ in 0..49 {
+            for movement in ["e5-e6", "g5-g6", "e6-e5", "g6-g5"] {
+                old.make_move(Move::parse(movement).unwrap()).unwrap();
+            }
+        }
+        assert_eq!(fresh.hash(), old.hash(), "the board and side are identical");
+        assert_eq!(old.quiet_plies(), 196);
+        assert_ne!(
+            super::transposition_key(&fresh),
+            super::transposition_key(&old)
+        );
+        let mut searcher = Searcher::new(4);
+        let early = searcher.search(fresh, depth(8));
+        assert!(early.score >= super::MATE_THRESHOLD);
+        let late = searcher.search(old, depth(8));
+        assert_eq!(late.score, 0, "neither runner can arrive before the draw");
+        assert_eq!(late.score, Searcher::new(4).search(old, depth(8)).score);
     }
 
     #[test]
@@ -2096,7 +2558,7 @@ mod tests {
 
     #[test]
     fn analysis_returns_three_ranked_legal_moves() {
-        let position = Position::starting(Mode::Annihilation);
+        let position = Position::starting(Mode::TotalWar);
         let mut searcher = Searcher::new(1);
         let result = searcher.analyze(position, depth(2), 3);
 
@@ -2119,7 +2581,7 @@ mod tests {
 
     #[test]
     fn analysis_streams_only_complete_depths_with_principal_variations() {
-        let position = Position::starting(Mode::Annihilation);
+        let position = Position::starting(Mode::TotalWar);
         let mut searcher = Searcher::new(1);
         let mut updates = Vec::new();
         let result = searcher.analyze_with_updates(position, depth(3), 2, |update| {
@@ -2201,8 +2663,8 @@ mod tests {
             ".........",
             ".........",
         ];
-        let position = Position::from_rows(Mode::Annihilation, Color::Red, &rows)
-            .expect("position must parse");
+        let position =
+            Position::from_rows(Mode::TotalWar, Color::Red, &rows).expect("position must parse");
         let mut searcher = Searcher::new(1);
         let result = searcher.search(position, depth(2));
         let best = result.best_move.expect("winning move must exist");
@@ -2249,8 +2711,8 @@ mod tests {
             ".....s...",
             ".r.......",
         ];
-        let position = Position::from_rows(Mode::Annihilation, Color::Red, &rows)
-            .expect("position must parse");
+        let position =
+            Position::from_rows(Mode::TotalWar, Color::Red, &rows).expect("position must parse");
         let mut searcher = Searcher::new(1);
         let result = searcher.search(position, depth(2));
         let best = result.best_move.expect("a capture must exist");
@@ -2290,47 +2752,85 @@ mod tests {
         assert_eq!(result.stats.nodes, 0);
     }
 
+    /// A root the host says has already occurred twice is not a drawn game, so
+    /// the search has to answer it with a move like any other.
+    ///
+    /// The inverse of what this used to assert, and it inverts again the day
+    /// `ModeRules::repetition_draws` does. The scan that would find the repeat
+    /// is not switched off with the rule and is still covered on its own, by
+    /// `repetition_detection_matches_a_full_path_scan`.
     #[test]
-    fn third_known_occurrence_is_a_draw() {
-        let position = Position::starting(Mode::Annihilation);
-        let mut searcher = Searcher::new(1);
-        let result = searcher.search_with_context(
-            position,
-            depth(4),
-            &[position.hash(), position.hash()],
-            None,
-        );
-        assert_eq!(result.stop_reason, SearchStopReason::Repetition);
-        assert_eq!(result.score, 0);
-        assert!(result.best_move.is_none());
+    fn a_third_known_occurrence_is_played_on() {
+        for mode in Mode::ALL {
+            let position = Position::starting(mode);
+            let mut searcher = Searcher::new(1);
+            let result = searcher.search_with_context(
+                position,
+                depth(4),
+                &[position.hash(), position.hash()],
+                None,
+            );
+            assert_eq!(
+                result.stop_reason == SearchStopReason::Repetition,
+                mode.rules().repetition_draws,
+                "{mode} stopped on a repeat it does not draw on",
+            );
+            assert!(result.best_move.is_some(), "{mode} answered with no move");
+        }
     }
 
+    /// A move that walks into a twice-seen position is scored on its merits,
+    /// because reaching one is not a draw.
+    ///
+    /// Stated as "the history changes nothing" rather than "the score is not
+    /// zero": zero is a perfectly ordinary score for a level position, so an
+    /// assertion about the number would pass for the wrong reason. What has to
+    /// hold is that the same move is worth the same with and without a history
+    /// saying it repeats.
     #[test]
-    fn analysis_scores_a_third_occurrence_as_a_draw() {
-        let position = Position::starting(Mode::Annihilation);
+    fn analysis_scores_a_third_occurrence_on_its_merits() {
+        // Infiltration, not Total War: claiming a tile is irreversible and
+        // would stop the repetition scan before it reached the repeat.
+        let position = Position::starting(Mode::Infiltration);
+        assert!(
+            !Mode::Infiltration.rules().repetition_draws,
+            "this test states what happens when the rule is off",
+        );
         let movement = position.legal_moves().as_slice()[0];
         let mut repeated = position;
         repeated
             .make_move(movement)
             .expect("generated move must be legal");
 
-        let mut searcher = Searcher::new(1);
-        let result = searcher.analyze_with_context(
-            position,
-            depth(1),
-            position.legal_moves().len(),
-            &[repeated.hash(), repeated.hash()],
+        let score_with = |history: &[u64]| {
+            let mut searcher = Searcher::new(1);
+            let result = searcher.analyze_with_context(
+                position,
+                depth(1),
+                position.legal_moves().len(),
+                history,
+            );
+            result
+                .lines
+                .iter()
+                .find(|line| line.movement == movement)
+                .expect("repeating move must be analyzed")
+                .score
+        };
+        assert_eq!(
+            score_with(&[repeated.hash(), repeated.hash()]),
+            score_with(&[]),
         );
-        let line = result
-            .lines
-            .iter()
-            .find(|line| line.movement == movement)
-            .expect("repeating move must be analyzed");
-        assert_eq!(line.score, 0);
     }
 
+    /// The same immobile picture in two modes, searched by one searcher, which
+    /// is what a session does. The score has to follow the mode rather than
+    /// whatever the previous search left behind.
     #[test]
-    fn stalemate_is_a_draw_by_default_and_the_rule_stays_overridable() {
+    fn a_no_move_node_is_scored_by_its_own_modes_rule() {
+        // A Red rock ringed by Blue papers can neither move nor capture,
+        // because paper beats rock. The papers are placed off both goal
+        // corners so neither side has already won in Intransitive.
         let rows = [
             ".........",
             ".........",
@@ -2342,107 +2842,125 @@ mod tests {
             ".........",
             ".........",
         ];
-        let position = Position::from_rows(Mode::Annihilation, Color::Red, &rows)
-            .expect("position must parse");
-        assert!(position.legal_moves().is_empty());
-        assert!(position.is_stalemate());
-
         let mut searcher = Searcher::new(1);
-        let draw = searcher.search(position, depth(2));
+
+        let drawn =
+            Position::from_rows(Mode::TotalWar, Color::Red, &rows).expect("position must parse");
+        assert!(drawn.legal_moves().is_empty());
+        assert!(drawn.is_stalemate());
+        let draw = searcher.search(drawn, depth(2));
         assert_eq!(draw.stop_reason, SearchStopReason::NoLegalMove);
         assert_eq!(draw.score, 0);
+        assert!(drawn.adjudicate().expect("terminal").winner.is_none());
 
-        searcher.set_no_move_outcome(NoMoveOutcome::Loss);
-        let loss = searcher.search(position, depth(2));
-        assert!(loss.score < -29_000);
-    }
-
-    #[test]
-    fn making_stalemate_a_loss_withdraws_the_immortality_bounds() {
-        // The bounds are only sound because stalemate is a draw. A rule set
-        // that makes it a loss must not keep them.
-        let rows = [
-            ".........",
-            ".........",
-            "..R......",
-            ".........",
-            ".........",
-            ".........",
-            "......r..",
-            ".........",
-            ".........",
-        ];
-        let position = Position::from_rows(Mode::Annihilation, Color::Red, &rows)
+        let lost = Position::from_rows(Mode::Intransitive, Color::Red, &rows)
             .expect("position must parse");
-        let mut searcher = Searcher::new(1);
-        searcher.set_no_move_outcome(NoMoveOutcome::Loss);
-        // Mutual immortality is no longer a proven draw, so the search must
-        // fall back to the heuristic instead of returning an exact zero.
-        let result = searcher.search(position, depth(4));
-        assert_eq!(result.stop_reason, SearchStopReason::DepthLimit);
-        searcher.set_no_move_outcome(NoMoveOutcome::Draw);
-        searcher.set_rule_proofs(true);
-        assert_eq!(searcher.search(position, depth(4)).score, 0);
-    }
-
-    #[test]
-    fn a_side_that_cannot_be_annihilated_is_never_scored_as_losing() {
-        // Blue owns no Paper, so the lone Red Rock can never be captured. Red
-        // is down five pieces, which every material weight hates, but the
-        // rules already guarantee at least a draw.
-        let rows = [
-            ".........",
-            "...SSS...",
-            "...SSS...",
-            ".........",
-            "....r....",
-            ".........",
-            ".........",
-            ".........",
-            ".........",
-        ];
-        let position = Position::from_rows(Mode::Annihilation, Color::Red, &rows)
-            .expect("position must parse");
-        assert!(!position.can_be_annihilated(Color::Red));
-        assert!(position.can_be_annihilated(Color::Blue));
-        assert!(
-            evaluate_with(&position, &EvalParams::DEFAULT) < 0,
-            "the raw heuristic must dislike this position for the clamp to matter"
+        let loss = searcher.search(lost, depth(2));
+        assert_eq!(loss.stop_reason, SearchStopReason::NoLegalMove);
+        assert!(loss.score < -29_000, "score was {}", loss.score);
+        assert_eq!(
+            lost.adjudicate().expect("terminal").winner,
+            Some(Color::Blue),
         );
 
-        let mut searcher = Searcher::new(1);
-        let result = searcher.search(position, depth(4));
-        assert!(
-            result.score >= 0,
-            "search returned {} for a provably unloseable position",
-            result.score
-        );
+        // And back again, so the searcher is not merely sticky.
+        assert_eq!(searcher.search(drawn, depth(2)).score, 0);
     }
 
+    /// Repeating a position is play in every mode, so the search must not hand
+    /// a repeat back as half a point in any of them.
+    ///
+    /// Written against `ModeRules::repetition_draws` rather than against its
+    /// current value, so it is still the right test the day a mode answers
+    /// otherwise: what it pins is that the search agrees with the mode. That
+    /// agreement is the whole reason the field exists — a search that folded a
+    /// repeat into a draw score where the rules do not would steer toward one,
+    /// and a search that did not where they do would steer away.
     #[test]
-    fn mutual_immortality_is_a_proven_draw() {
-        // Rock never captures Rock, so neither side can ever be annihilated
-        // and the only reachable results are repetition and stalemate draws.
-        let rows = [
+    fn the_search_scores_a_repeat_the_way_its_mode_does() {
+        for mode in Mode::ALL {
+            let position = Position::starting(mode);
+            let mut searcher = Searcher::new(1);
+            let history = [position.hash(), position.hash()];
+            let result = searcher.search_with_context(position, depth(2), &history, None);
+            assert_eq!(
+                result.stop_reason == SearchStopReason::Repetition,
+                mode.rules().repetition_draws,
+                "{mode} scored a third occurrence wrongly",
+            );
+        }
+    }
+
+    /// The bound on a game's length, and the one no mode may lift.
+    ///
+    /// Played out rather than asserted on a hand-built position, because
+    /// `quiet_plies` is maintained by `make_move` and the point is that two
+    /// hundred quiet plies *arrive* at zero however they were played. Two
+    /// pieces walk loops of eight and seven, so the board only comes back to a
+    /// position it has been in twice before after 4 x lcm(8, 7) = 224 plies.
+    /// That is past the limit, which means this test says the same thing
+    /// whether or not a mode draws on repetition — on a two-square shuffle it
+    /// would be about the wrong rule.
+    #[test]
+    fn a_hundred_moves_with_no_capture_is_a_draw_in_every_mode() {
+        const BLUE_LOOP: [(u8, u8); 8] = [
+            (1, 3),
+            (2, 3),
+            (3, 3),
+            (3, 4),
+            (3, 5),
+            (2, 5),
+            (1, 5),
+            (1, 4),
+        ];
+        const RED_LOOP: [(u8, u8); 7] = [(6, 3), (7, 3), (8, 3), (8, 4), (8, 5), (7, 5), (6, 4)];
+        // Two pieces in the middle of an empty board, clear of Infiltration's
+        // home ranks and Intransitive's corners so no win condition fires, and
+        // five files apart so they never come near each other. Rows run from
+        // Blue's home boundary upward, and `R` is Blue's rock.
+        const WALKING_ROOM: [&str; 9] = [
             ".........",
             ".........",
-            "..R......",
+            ".........",
+            ".R....r..",
             ".........",
             ".........",
             ".........",
-            "......r..",
             ".........",
             ".........",
         ];
-        let position = Position::from_rows(Mode::Annihilation, Color::Red, &rows)
-            .expect("position must parse");
-        assert!(!position.can_be_annihilated(Color::Red));
-        assert!(!position.can_be_annihilated(Color::Blue));
+        let square = |(x, y): (u8, u8)| Square::from_xy(x, y).expect("valid square");
 
-        let mut searcher = Searcher::new(1);
-        let result = searcher.search(position, depth(6));
-        assert_eq!(result.score, 0);
-        assert!(result.best_move.is_some());
+        for mode in Mode::ALL {
+            let mut position = Position::from_rows(mode, crate::FIRST_TO_MOVE, &WALKING_ROOM)
+                .expect("position must parse");
+            for ply in 0..QUIET_PLY_LIMIT {
+                assert!(
+                    position.adjudicate().is_none(),
+                    "{mode} ended after {ply} quiet plies",
+                );
+                assert_eq!(position.quiet_plies(), ply);
+                let (loop_squares, step) = if ply % 2 == 0 {
+                    (&BLUE_LOOP[..], usize::from(ply / 2) % BLUE_LOOP.len())
+                } else {
+                    (&RED_LOOP[..], usize::from(ply / 2) % RED_LOOP.len())
+                };
+                let movement = Move::new(
+                    square(loop_squares[step]),
+                    square(loop_squares[(step + 1) % loop_squares.len()]),
+                );
+                position.make_move(movement).expect("walk must be legal");
+            }
+            assert_eq!(position.quiet_plies(), QUIET_PLY_LIMIT);
+            let outcome = position.adjudicate().expect("the game must be over");
+            assert_eq!(outcome.reason, EndReason::NoCapture, "{mode}");
+            assert!(outcome.winner.is_none(), "{mode}");
+
+            let mut searcher = Searcher::new(1);
+            let result = searcher.search(position, depth(2));
+            assert_eq!(result.stop_reason, SearchStopReason::NoCapture, "{mode}");
+            assert_eq!(result.score, 0, "{mode}");
+        }
     }
 
     #[test]
@@ -2510,6 +3028,14 @@ mod tests {
         };
 
         let mut checked = 0_usize;
+        // Every mode, with the rule forced on for the length of the test.
+        //
+        // `is_repetition` answers false outright where the mode does not draw
+        // on a repeat, and no mode does now — so filtering on the rule, which
+        // this used to do, would leave nothing to check. The rule and the scan
+        // are separate things: whether a repeat is worth half a point is the
+        // mode's to say, and *finding* one in a bounded window is this code's,
+        // and it has to keep working for the day the rule comes back.
         for mode in Mode::ALL {
             for round in 0..12 {
                 let mut position = Position::starting(mode);
@@ -2522,6 +3048,7 @@ mod tests {
                 };
                 let mut searcher = Searcher::new(1);
                 searcher.begin_search(&prefix, &position);
+                searcher.mode_rules.repetition_draws = true;
 
                 let mut reference = prefix.clone();
                 reference.push(position.hash());
@@ -2561,6 +3088,88 @@ mod tests {
             }
         }
         assert!(checked > 500, "only {checked} path states were compared");
+    }
+
+    /// Restricting the root must answer about exactly the moves it was asked
+    /// about, in score order.
+    ///
+    /// This is what makes a move grade meaningful. Asking one search about
+    /// {best move, played move} scores both under identical conditions —
+    /// same window, same table, same ordering — so their difference is the
+    /// loss and nothing else. Two separate searches would each be exact and
+    /// still differ by a few points, because a fixed depth is only fixed
+    /// until the transposition table starts answering from a deeper one.
+    #[test]
+    fn a_restricted_root_answers_about_exactly_the_requested_moves() {
+        for mode in Mode::ALL {
+            let position = Position::starting(mode);
+            let legal = position.legal_moves();
+            let reference = Searcher::new(4).analyze(position, depth(5), legal.len());
+            let best = reference.lines[0].movement;
+            let worst = reference.lines.last().expect("lines").movement;
+            assert_ne!(best, worst);
+
+            let paired =
+                Searcher::new(4).analyze_root_moves(position, depth(5), 2, &[], &[worst, best]);
+            assert_eq!(paired.lines.len(), 2, "{mode}");
+            assert_eq!(
+                paired.lines[0].movement, best,
+                "{mode}: the stronger move did not come first"
+            );
+            assert_eq!(paired.lines[1].movement, worst, "{mode}");
+            assert!(
+                paired.lines[0].score >= paired.lines[1].score,
+                "{mode}: lines are not in score order"
+            );
+
+            let alone = Searcher::new(4).analyze_root_moves(position, depth(5), 4, &[], &[worst]);
+            assert_eq!(alone.lines.len(), 1, "{mode}: a filter of one gave more");
+            assert_eq!(alone.lines[0].movement, worst, "{mode}");
+            assert_eq!(
+                alone.lines[0].principal_variation.first().copied(),
+                Some(worst),
+                "{mode}: the variation does not start with its own move"
+            );
+        }
+    }
+
+    /// A restricted search saw only part of the root, so its verdict is not
+    /// this position's verdict. Storing it would let a later search take a
+    /// transposition cutoff on a number that was never true.
+    #[test]
+    fn a_restricted_root_leaves_no_entry_behind() {
+        let position = Position::starting(Mode::TotalWar);
+        let legal = position.legal_moves();
+        let full = Searcher::new(4).analyze(position, depth(4), legal.len());
+        let worst = full.lines.last().expect("a legal position has lines");
+        assert_ne!(worst.movement, full.lines[0].movement);
+
+        let mut searcher = Searcher::new(4);
+        let restricted = searcher.analyze_root_moves(position, depth(4), 1, &[], &[worst.movement]);
+        assert_eq!(restricted.lines[0].movement, worst.movement);
+        assert!(
+            searcher.table.probe(position.hash()).is_none(),
+            "a restricted analysis stored a root verdict it is not entitled to"
+        );
+
+        // The restriction is spent, not sticky: the next analysis sees the
+        // whole position again.
+        let after = searcher.analyze(position, depth(4), legal.len());
+        assert_eq!(after.lines.len(), full.lines.len());
+    }
+
+    /// Asking about a move the position does not have is a question, not a
+    /// crash, and the answer must be distinguishable from "no good move".
+    #[test]
+    fn a_restricted_root_reports_an_illegal_request() {
+        let position = Position::starting(Mode::TotalWar);
+        let illegal = Move::new(
+            Square::new(0).expect("corner"),
+            Square::new(80).expect("corner"),
+        );
+        let result = Searcher::new(4).analyze_root_moves(position, depth(4), 1, &[], &[illegal]);
+        assert!(result.lines.is_empty());
+        assert_eq!(result.stop_reason, SearchStopReason::NoLegalMove);
     }
 
     /// Reductions must grow with both depth and lateness, and vanish at zero.

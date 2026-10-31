@@ -10,7 +10,7 @@ publish = false
 [lib]
 name = "rpsfish"
 path = "src/lib.rs"
-crate-type = ["rlib", "cdylib"]
+crate-type = ["rlib", "cdylib", "staticlib"]
 
 [[bin]]
 name = "rpsfish"
@@ -19,6 +19,10 @@ path = "src/main.rs"
 [[bin]]
 name = "arena"
 path = "src/bin/arena.rs"
+
+[[bin]]
+name = "book"
+path = "src/bin/book.rs"
 
 [dependencies]
 

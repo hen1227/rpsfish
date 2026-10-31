@@ -31,12 +31,11 @@ use crate::model::{Color, EndReason, GameOutcome, Mode, Move};
 use crate::position::Position;
 use crate::search::{SearchLimits, SearchTuning, Searcher};
 
-/// Hard ply ceiling for a self-play game.
-///
-/// Threefold repetition ends nearly every cyclic game, but a mode could in
-/// principle wander for a very long time. A game stopped by this cap is scored
-/// as a draw and flagged, so a tuning run can see how often it happens.
-pub const DEFAULT_MAX_PLIES: u16 = 400;
+/// A backstop beyond every legal game's no-capture limit. There can be fewer
+/// captures than starting pieces, and each capture buys at most one more
+/// quiet interval. An arbitrary 400-ply cap used to draw unfinished defensive
+/// games and contaminate corner-race measurements.
+pub const DEFAULT_MAX_PLIES: u16 = (crate::SQUARE_COUNT as u16 + 1) * crate::model::QUIET_PLY_LIMIT;
 
 /// One side's engine configuration.
 #[derive(Clone, Copy, Debug)]
@@ -177,9 +176,14 @@ impl MatchRunner {
             if let Some(outcome) = position.adjudicate() {
                 return record(outcome, plies, false);
             }
-            if occurrences(&history, position.hash()) >= 3 {
+            if mode.rules().repetition_draws && occurrences(&history, position.hash()) >= 3 {
                 return record(GameOutcome::draw(EndReason::Repetition), plies, false);
             }
+            // The backstop, not the bound. No mode has a repetition draw now,
+            // so two engines shuffling are playing rather than drawing -- but
+            // `adjudicate` above ends such a game on QUIET_PLY_LIMIT, so a walk
+            // that reaches this line has been *capturing* for max_plies and is
+            // being cut off rather than adjudicated. The `true` says so.
             if plies >= max_plies {
                 return record(GameOutcome::draw(EndReason::Repetition), plies, true);
             }
@@ -330,11 +334,11 @@ mod tests {
     fn self_play_is_reproducible_for_a_fixed_seed() {
         let config = EngineConfig::default().with_nodes(1_200);
         let mut random = Random::new(7);
-        let opening = random_opening(Mode::Annihilation, 4, &mut random).expect("opening exists");
+        let opening = random_opening(Mode::TotalWar, 4, &mut random).expect("opening exists");
         let mut first = MatchRunner::new(&config, &config);
         let mut second = MatchRunner::new(&config, &config);
-        let left = first.play(Mode::Annihilation, &opening, &config, &config, 200);
-        let right = second.play(Mode::Annihilation, &opening, &config, &config, 200);
+        let left = first.play(Mode::TotalWar, &opening, &config, &config, 200);
+        let right = second.play(Mode::TotalWar, &opening, &config, &config, 200);
         assert_eq!(left.result, right.result);
         assert_eq!(left.plies, right.plies);
     }

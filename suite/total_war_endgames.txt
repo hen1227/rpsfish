@@ -1,0 +1,120 @@
+name = race-01-tiles-left
+mode = V5
+fen = 9/9/3S2p2/9/9/9/6S2/1P5R1/9 b rrrrrrrrr/rrrrrrrrr/rrrbrrr1r/rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrrrbrr/bbbbrrrbr/bbbbbbbbb
+verdict = red
+note = same pieces every time, only the clock changes: 1 neutral, red 64 blue 16, R#2
+
+name = race-03-tiles-left
+mode = V5
+fen = 9/9/3S2p2/9/9/9/6S2/1P5R1/9 b rrrrrrrrr/rrrrrrr1r/rrrbrrr2/rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrrrbrr/bbbbrrrbr/bbbbbbbbb
+verdict = red
+note = same pieces every time, only the clock changes: 3 neutral, red 62 blue 16, R#6
+
+name = race-05-tiles-left
+mode = V5
+fen = 9/9/3S2p2/9/9/9/6S2/1P5R1/9 b rrrrrrrrr/rrrrrr3/rrrbrrr2/rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrrrbrr/bbbbrrrbr/bbbbbbbbb
+verdict = blue
+note = same pieces every time, only the clock changes: 5 neutral, red 60 blue 16, B#13
+
+name = race-07-tiles-left
+mode = V5
+fen = 9/9/3S2p2/9/9/9/6S2/1P5R1/9 b rrrrrr2r/rrrrrr3/rrrbrrr2/rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrrrbrr/bbbbrrrbr/bbbbbbbbb
+verdict = blue
+note = same pieces every time, only the clock changes: 7 neutral, red 58 blue 16, B#9
+
+name = race-09-tiles-left
+mode = V5
+fen = 9/9/3S2p2/9/9/9/6S2/1P5R1/9 b rrrrrr3/rrrrrr3/rrrb1rr2/rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrrrbrr/bbbbrrrbr/bbbbbbbbb
+verdict = blue
+note = same pieces every time, only the clock changes: 9 neutral, red 56 blue 16, B#9
+
+name = race-13-tiles-left
+mode = V5
+fen = 9/9/3S2p2/9/9/9/6S2/1P5R1/9 b rrrrrr3/rrrr5/rrrb2r2/rrrrrrrrr/1rrrrrrrr/rrrrrrrrr/rrrrrrbrr/bbbbrrrbr/bbbbbbbbb
+verdict = blue
+note = same pieces every time, only the clock changes: 13 neutral, red 52 blue 16, B#9
+
+name = race-25-tiles-left
+mode = V5
+fen = 9/9/3S2p2/9/9/9/6S2/1P5R1/9 b rrrrrr3/rrrr5/rrrb2r2/4rrrrr/9/rrrrrrrrr/rrrrrrbrr/rbrrrrrbr/bbbbbbbbr
+verdict = blue
+note = a long clock is still a loss for the hunted side, B#9
+
+name = race-13-one-hunter
+mode = V5
+fen = 9/9/3S2p2/9/9/9/9/1P5R1/9 b rrrrrr3/rrrr5/rrrb2r2/rrrrrrrrr/1rrrrrrrr/rrrrrrrrr/rrrrrrrrr/bbbbbrrbr/bbbbbbbbb
+verdict = blue
+note = one immortal hunter is enough to corner a lone runner against the edge, B#9
+
+name = race-13-three-hunters
+mode = V5
+fen = 9/9/3S2p2/9/4S4/9/6S2/1P7/9 b rrrrrr3/rrrr5/rrrb2r2/rrrrrrrrr/1rrrbrrrr/rrrrrrrrr/rrrrrrbrr/bbbbrrrrr/bbbbbbbbb
+verdict = blue
+note = more hunters only makes it faster, B#7
+
+name = race-03-hunters-far
+mode = V5
+fen = p8/9/9/9/9/9/9/7SS/1RP6 r r1rrrrrrr/2rrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/bbbbbbbbr/bbbbbbbbb/bbbbbbbbb
+verdict = red
+note = hunters eight squares away cannot arrive in time, R#5
+
+name = flagship-game-position
+mode = V5
+fen = 9/9/3S2p2/9/9/9/6S2/1P5R1/9 b bbbbbb3/bbbb5/bbbb2r2/bbbbbbbbb/rrrrrrrr1/rrrrrrrrr/rrrrrrbrr/rbrrrrrbr/rrrrrrrrr
+verdict = blue
+note = Obsidian vs Henhen1227 move 121; red 42 blue 26 neutral 13, red's only piece huntable forever, B#9
+
+name = ends-it-before-the-hunt-arrives
+mode = V5
+fen = p8/9/9/9/9/9/9/8S/6RPS r r1rrrrrrr/1rrrrrrrr/rrrrrrrrr/rrrrrrrrr/brrrrrrrr/bbbbbbbbb/bbbbbbbbb/bbbbbbbbb/bbbbbbbbb
+verdict = red
+note = doomed last piece, but only two tiles left to claim, R#3
+
+name = last-piece-is-immortal
+mode = V5
+fen = 9/9/3S5/9/4r4/9/6S2/1R7/9 b bbbbbb3/bbbb5/bbbb2r2/bbbbbbbbb/rrrrrrrr1/rrrrrrrrr/rrrrrrbrr/rbrrrrrbr/rrrrrrrrr
+verdict = red
+note = red's lone rock can never be captured and blue's territory ceiling is 39 against red's 42
+
+name = infiltration-goal-in-one
+mode = V3
+fen = 9/4s4/9/9/9/9/9/4R4/9 r 9/9/9/9/9/9/9/9/9
+verdict = red
+margin = 0
+note = red scissors one step from its target row, R#1
+
+name = far-hunters-04-tiles-left
+mode = V5
+fen = p8/9/9/9/9/9/9/7SS/1RP6 r r2rrrrrr/2rrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/bbbbbbbbr/bbbbbbbbb/bbbbbbbbb
+verdict = red
+note = hunters seven squares off, so the hunted side outruns six tiles and not ten, R#7
+
+name = far-hunters-06-tiles-left
+mode = V5
+fen = p8/9/9/9/9/9/9/7SS/1RP6 r r2rrrrrr/3rrrrrr/1rrrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/bbbbbbbbr/bbbbbbbbb/bbbbbbbbb
+verdict = red
+note = hunters seven squares off, so the hunted side outruns six tiles and not ten, R#11
+
+name = far-hunters-10-tiles-left
+mode = V5
+fen = p8/9/9/9/9/9/9/7SS/1RP6 r r3rrrrr/4rrrrr/3rrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/bbbbbbbbr/bbbbbbbbb/bbbbbbbbb
+verdict = blue
+note = hunters seven squares off, so the hunted side outruns six tiles and not ten, B#14
+
+name = far-hunters-12-tiles-left
+mode = V5
+fen = p8/9/9/9/9/9/9/7SS/1RP6 r r3rrrrr/4rrrrr/3rrrrrr/2rrrrrrr/rrrrrrrrr/rrrrrrrrr/bbbbbbbbr/bbbbbbbbb/bbbbbbbbb
+verdict = blue
+note = hunters seven squares off, so the hunted side outruns six tiles and not ten, B#14
+
+name = near-hunters-02-tiles-left
+mode = V5
+fen = 9/9/3S2p2/9/9/9/6S2/1P5R1/9 b rrrrrrrrr/rrrrrrrrr/rrrbrrr2/rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrrrbrr/bbbbrrrbr/bbbbbbbbb
+verdict = red
+note = hunters three squares off and the clock still runs out first, R#4
+
+name = near-hunters-04-tiles-left
+mode = V5
+fen = 9/9/3S2p2/9/9/9/6S2/1P5R1/9 b rrrrrrrrr/rrrrrrr2/rrrbrrr2/rrrrrrrrr/rrrrrrrrr/rrrrrrrrr/rrrrrrbrr/bbbbrrrbr/bbbbbbbbb
+verdict = red
+note = hunters three squares off and the clock still runs out first, R#8

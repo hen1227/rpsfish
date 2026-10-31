@@ -6,3 +6,11 @@
 
 # IntelliJ / RustRover
 /.idea/
+
+# Opening books. Generated, large, and rebuildable from the engine that made
+# them; `meta.txt` records which build that was.
+/book/
+
+# Bot client configuration. `rpsbot.py` writes it into whichever directory it
+# is run from, and it holds a live bot token.
+/rpsbot.conf

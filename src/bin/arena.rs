@@ -25,8 +25,8 @@
 //! or rejected by evidence rather than by whoever wrote it.
 //!
 //! ```text
-//! cargo run --release --bin arena -- match --games 400 --candidate annihilation_scarcity_1=25
-//! cargo run --release --bin arena -- tune --mode annihilation --iterations 60
+//! cargo run --release --bin arena -- match --games 400 --candidate total_war_scarcity_1=25
+//! cargo run --release --bin arena -- tune --mode total-war --iterations 60
 //! ```
 
 use std::env;
@@ -38,7 +38,7 @@ use std::thread;
 use rpsfish::selfplay::{
     DEFAULT_MAX_PLIES, EngineConfig, GameResult, MatchRunner, Random, balanced_opening,
 };
-use rpsfish::{EvalParams, Mode, SearchTuning};
+use rpsfish::{EndReason, EvalParams, Mode, SearchTuning};
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = env::args().skip(1).collect();
@@ -60,7 +60,7 @@ usage:
   arena show                       print the current default weights
 
 common options:
-  --mode <annihilation|total-war|infiltration|all>   default: all (match), annihilation (tune)
+  --mode <total-war|infiltration|intransitive|all>   default: all (match), total-war (tune)
   --nodes <n>          per-move node budget          default: 20000
   --openings <plies>   random opening length         default: 6
   --threads <n>        parallel games                default: available parallelism
@@ -139,7 +139,7 @@ impl Options {
     fn parse(arguments: &[String], command: Command) -> Result<Self, String> {
         let mut options = Self {
             modes: if command == Command::Tune {
-                vec![Mode::Annihilation]
+                vec![Mode::TotalWar]
             } else {
                 Mode::ALL.to_vec()
             },
@@ -320,15 +320,34 @@ struct Tally {
     losses: u32,
     truncated: u32,
     plies: u64,
+    /// Games per [`EndReason`], split by result, from the candidate's view.
+    ///
+    /// A score says how often the candidate won and never how, and in Total
+    /// War the how is the whole question: the mode has two win conditions
+    /// pulling in opposite directions, so "lost on the clock with a territory
+    /// lead" and "lost the army" are the same 0.0 in the score column and
+    /// call for opposite changes. Indexed `[reason][result]` with result 0
+    /// win, 1 draw, 2 loss, which is the smallest thing that separates them.
+    reasons: [[u32; 3]; EndReason::ALL.len()],
 }
 
 impl Tally {
-    fn add(&mut self, result: GameResult, truncated: bool, plies: u16) {
-        match result {
-            GameResult::RedWin => self.wins += 1,
-            GameResult::Draw => self.draws += 1,
-            GameResult::BlueWin => self.losses += 1,
-        }
+    fn add(&mut self, result: GameResult, reason: EndReason, truncated: bool, plies: u16) {
+        let outcome = match result {
+            GameResult::RedWin => {
+                self.wins += 1;
+                0
+            }
+            GameResult::Draw => {
+                self.draws += 1;
+                1
+            }
+            GameResult::BlueWin => {
+                self.losses += 1;
+                2
+            }
+        };
+        self.reasons[reason.index()][outcome] += 1;
         if truncated {
             self.truncated += 1;
         }
@@ -341,6 +360,11 @@ impl Tally {
         self.losses += other.losses;
         self.truncated += other.truncated;
         self.plies += other.plies;
+        for (mine, theirs) in self.reasons.iter_mut().zip(other.reasons) {
+            for (slot, count) in mine.iter_mut().zip(theirs) {
+                *slot += count;
+            }
+        }
     }
 
     const fn games(&self) -> u32 {
@@ -459,7 +483,7 @@ fn play_match(
                         &baseline_engine,
                         DEFAULT_MAX_PLIES,
                     );
-                    local.add(first.result, first.truncated, first.plies);
+                    local.add(first.result, first.reason, first.truncated, first.plies);
 
                     let second = baseline_red.play(
                         mode,
@@ -471,6 +495,7 @@ fn play_match(
                     // The candidate played Blue here, so flip the result.
                     local.add(
                         second.result.from_perspective(rpsfish::Color::Blue),
+                        second.reason,
                         second.truncated,
                         second.plies,
                     );
@@ -519,6 +544,18 @@ fn report(label: &str, tally: &Tally, options: &Options) -> String {
             tally.plies as f64 / f64::from(games),
             tally.truncated
         );
+        // Reasons that never happened are left out rather than printed as
+        // zeroes: every mode reaches at most three of the five.
+        let breakdown = EndReason::ALL
+            .into_iter()
+            .filter_map(|reason| {
+                let [wins, draws, losses] = tally.reasons[reason.index()];
+                (wins + draws + losses > 0).then(|| format!("{reason} {wins}/{draws}/{losses}"))
+            })
+            .collect::<Vec<_>>();
+        if !breakdown.is_empty() {
+            let _ = writeln!(text, "  ended  W/D/L by reason  {}", breakdown.join("  "));
+        }
     }
     text
 }
@@ -750,9 +787,9 @@ fn run_tune(options: &Options) -> Result<(), String> {
 /// The weights belonging to one mode, identified by name prefix.
 fn default_tuned_names(mode: Mode) -> Vec<String> {
     let prefix = match mode {
-        Mode::Annihilation => "annihilation_",
         Mode::TotalWar => "total_war_",
         Mode::Infiltration => "infiltration_",
+        Mode::Intransitive => "intransitive_",
     };
     EvalParams::NAMES
         .iter()

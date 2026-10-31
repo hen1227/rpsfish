@@ -1,0 +1,83 @@
+# Intransitive (V6) positions, verdicts proven by search to a mate score.
+#
+# Updated for the current a1/i9 goals and stalemate-loss rule (RULES_VERSION 3).
+# What this suite is for: Intransitive looks like Infiltration with a smaller
+# goal, and almost every position below is one where that reading gives the
+# wrong answer. They are grouped by which assumption they break.
+#
+# `margin` is stated per case because the default 300 is Total War's scale.
+# One piece is 49 here; margin 70 asks for more than a material-sized edge.
+# The searched column adjudicates the result; the static column is a heuristic.
+
+# --- The goal is a point, so rank progress is not progress -------------------
+
+name = wrong-file-runner
+mode = V6
+fen = 8s/9/9/9/9/9/6S2/9/9 r
+verdict = blue
+margin = 70
+note = Red's Scissors stands on i1: eight ranks across the board, and eight moves from a1 because it is up the wrong file. Blue is two moves from i9. Neither Scissors can take the other, so this is a pure race and Blue wins it by six tempi. An Infiltration-shaped race term reads Red as home.
+
+# --- The goal is one tile, so it can be stood on ------------------------------
+
+name = sealed-corner
+mode = V6
+fen = S8/9/9/9/4p4/3p5/6P2/9/9 r
+verdict = blue
+margin = 70
+note = Blue's Scissors sits on a1. Red owns only Papers, and Paper does not take Scissors, so Red cannot capture the plug. Blue can keep it in place while the Paper runs the two moves to i9. The blockade has no analogue in Infiltration, where the goal is nine squares wide.
+
+name = plug-is-not-a-seal
+mode = V6
+fen = S8/7P1/1r7/9/9/9/9/9/9 r
+verdict = red
+margin = 70
+note = The same blockade, against an army that holds the answer to it. Rock takes Scissors, so Red's Rock on b3 walks to a2 and captures into the corner, which is a win rather than a capture. A plug is worth holding only while the enemy lacks the one kind that beats it.
+
+# --- The cycle decides which defender works, and distance does not ------------
+
+name = scissors-answers-paper
+mode = V6
+fen = 9/9/9/9/9/9/6P2/7s1/9 r
+verdict = red
+margin = 70
+note = Blue's Paper is two moves from i9 and Red's Scissors is beside it. Scissors takes Paper, so the runner is captured and Blue loses by stalemate with no pieces left. Compare rock-cannot, which is the same two squares.
+
+name = rock-cannot
+mode = V6
+fen = 9/9/9/9/9/9/6P2/7r1/9 r
+verdict = blue
+margin = 70
+note = The identical geometry with Red's defender changed from Scissors to Rock. Paper takes Rock, so the defender is not a defender: Blue mates. One kind apart is the whole difference between a win and a loss, which is what the mode is named for. The exact endgame table distinguishes both outcomes without relying on a material bonus.
+
+name = rock-cannot-blue-to-move
+mode = V6
+fen = 9/9/9/9/9/9/6P2/7r1/9 b
+verdict = blue
+margin = 70
+note = And it does not depend on the tempo: Blue wins this with either side to move.
+
+# --- Tempo, which no static term here can see --------------------------------
+
+name = one-tempo-race-red
+mode = V6
+fen = 9/9/9/3p5/9/9/5P3/9/9 r
+verdict = red
+margin = 0
+note = Two Papers, which cannot capture each other, both exactly three moves from their corners. Whoever moves first arrives first. Expected to fail the static column and pass the searched one: the evaluation scores this dead level, correctly, because the side to move is the only thing that decides it.
+
+name = one-tempo-race-blue
+mode = V6
+fen = 9/9/9/3p5/9/9/5P3/9/9 b
+verdict = blue
+margin = 0
+note = The same board with the other side to move, and the other result. The pair exists so that a future tempo term has something to be measured against.
+
+# --- An uncapturable plug still has to obey the turn rule --------------------
+
+name = sealed-plug-must-move
+mode = V6
+fen = 9/9/9/9/9/9/9/7S1/8s r
+verdict = blue
+margin = 70
+note = Red's only Scissors sits on i9 and cannot be captured by Blue's Scissors. Red must nevertheless move it, opening i9 for Blue on the next ply. Uncapturable does not mean a permanent blockade when there is no spare piece to spend a turn on.

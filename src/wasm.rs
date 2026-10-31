@@ -17,21 +17,31 @@
 //
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
-//! Dependency-free WebAssembly adapter used by the browser analysis worker.
+//! Dependency-free C ABI used by the browser analysis worker and the iOS and
+//! Android builds.
 //!
 //! The board crosses the ABI as low/high `u64` halves of the core's eight
-//! `u128` bitboards. Results stay in worker-local storage and are read through
-//! small scalar getters, avoiding an allocator or JavaScript glue generator.
+//! `u128` bitboards. Results stay in adapter-owned storage and are read through
+//! small scalar getters, avoiding an allocator or language-specific glue
+//! generator. WebAssembly state is thread-local; iOS and Android state is
+//! process-global and mutex-protected, because a serial GCD queue may migrate
+//! between threads and nothing promises an Android caller one thread either.
+//! The same exported symbols are linked into both static libraries; only the
+//! WebAssembly clock import below is platform-specific.
 
 // Rust 2024 classifies stable symbol names as unsafe attributes. The exported
 // functions themselves contain no unsafe operations.
 #![allow(unsafe_code)]
 
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 use std::cell::RefCell;
+#[cfg(any(target_os = "ios", target_os = "android"))]
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use crate::{
-    AnalysisResult, Color, Mode, PieceKind, Position, SearchLimits, SearchStopReason, Searcher,
+    AnalysisResult, Color, Mode, Move, PieceKind, Position, SearchLimits, SearchStopReason,
+    Searcher, Square,
 };
 
 // Eight rather than three because the bot ladder samples among root moves to
@@ -43,11 +53,13 @@ use crate::{
 const MAX_VARIATIONS: usize = 8;
 const MAX_PV_LENGTH: usize = 127;
 
+#[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn rpsfish_now_ms() -> f64;
 }
 
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn monotonic_time_ms() -> f64 {
     // The browser worker supplies performance.now(), which is monotonic and
     // lets the core enforce time limits during a synchronous WASM search.
@@ -136,13 +148,85 @@ impl WasmAnalysis {
     }
 }
 
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 thread_local! {
     static LAST_ANALYSIS: RefCell<WasmAnalysis> = const { RefCell::new(WasmAnalysis::EMPTY) };
     static POSITION_HISTORY: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    /// Root moves the next analysis is restricted to, cleared once it runs.
+    static ROOT_FILTER: RefCell<Vec<Move>> = const { RefCell::new(Vec::new()) };
     // A deep search visits tens of millions of nodes, so a small table
     // throws away most of the work it does. Thirty-two megabytes of browser
     // memory buys two million entries.
     static SEARCHER: RefCell<Searcher> = RefCell::new(Searcher::new(32));
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+static LAST_ANALYSIS: Mutex<WasmAnalysis> = Mutex::new(WasmAnalysis::EMPTY);
+#[cfg(any(target_os = "ios", target_os = "android"))]
+static POSITION_HISTORY: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+#[cfg(any(target_os = "ios", target_os = "android"))]
+static ROOT_FILTER: Mutex<Vec<Move>> = Mutex::new(Vec::new());
+#[cfg(any(target_os = "ios", target_os = "android"))]
+static SEARCHER: LazyLock<Mutex<Searcher>> = LazyLock::new(|| Mutex::new(Searcher::new(32)));
+
+fn with_last_analysis<Result>(action: impl FnOnce(&mut WasmAnalysis) -> Result) -> Result {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        action(
+            &mut LAST_ANALYSIS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        LAST_ANALYSIS.with(|state| action(&mut state.borrow_mut()))
+    }
+}
+
+fn with_history<Result>(action: impl FnOnce(&mut Vec<u64>) -> Result) -> Result {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        action(
+            &mut POSITION_HISTORY
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        POSITION_HISTORY.with(|state| action(&mut state.borrow_mut()))
+    }
+}
+
+fn with_root_filter<Result>(action: impl FnOnce(&mut Vec<Move>) -> Result) -> Result {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        action(
+            &mut ROOT_FILTER
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        ROOT_FILTER.with(|state| action(&mut state.borrow_mut()))
+    }
+}
+
+fn with_searcher<Result>(action: impl FnOnce(&mut Searcher) -> Result) -> Result {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        action(
+            &mut SEARCHER
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        SEARCHER.with(|state| action(&mut state.borrow_mut()))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -198,9 +282,13 @@ pub extern "C" fn rpsfish_analyze(
         return -2;
     };
 
-    let prior_hashes = POSITION_HISTORY.with(|history| history.borrow().clone());
-    let result = SEARCHER.with(|searcher| {
-        searcher.borrow_mut().analyze_with_context(
+    let prior_hashes = with_history(|history| history.clone());
+    // The filter is spent by the search it was built for. A restriction that
+    // outlived its call would silently answer the next question about a
+    // different position with the wrong root.
+    let root_moves = with_root_filter(core::mem::take);
+    let result = with_searcher(|searcher| {
+        searcher.analyze_root_moves(
             position,
             SearchLimits {
                 max_depth: u8::try_from(max_depth.clamp(1, MAX_PV_LENGTH as i32)).unwrap_or(8),
@@ -211,17 +299,63 @@ pub extern "C" fn rpsfish_analyze(
             },
             usize::try_from(variations.clamp(1, MAX_VARIATIONS as i32)).unwrap_or(1),
             &prior_hashes,
+            &root_moves,
         )
     });
     let analysis = WasmAnalysis::from_result(result);
     let count = analysis.count;
-    LAST_ANALYSIS.with(|slot| slot.replace(analysis));
+    with_last_analysis(|slot| *slot = analysis);
     count
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rpsfish_history_clear() {
-    POSITION_HISTORY.with(|history| history.borrow_mut().clear());
+    with_history(Vec::clear);
+}
+
+/// How many prior positions the engine currently holds.
+#[unsafe(no_mangle)]
+pub extern "C" fn rpsfish_history_len() -> i32 {
+    with_history(|history| i32::try_from(history.len()).unwrap_or(i32::MAX))
+}
+
+/// Drop prior positions past `length`, keeping the rest.
+///
+/// Reviewing a game walks one position at a time, and rebuilding the whole
+/// history for each step is quadratic in the length of the game. Truncating
+/// and pushing one position makes it linear.
+#[unsafe(no_mangle)]
+pub extern "C" fn rpsfish_history_truncate(length: i32) -> i32 {
+    with_history(|history| {
+        if let Ok(length) = usize::try_from(length) {
+            history.truncate(length);
+        }
+        i32::try_from(history.len()).unwrap_or(i32::MAX)
+    })
+}
+
+/// Forget any root restriction that has not been used yet.
+#[unsafe(no_mangle)]
+pub extern "C" fn rpsfish_root_filter_clear() {
+    with_root_filter(Vec::clear);
+}
+
+/// Restrict the next `rpsfish_analyze` to this move, and return how many
+/// moves the restriction now holds.
+///
+/// Squares are board indices, `y * 9 + x`. A restricted analysis reports no
+/// lines at all when none of the requested moves is legal in the position,
+/// which is how a caller learns it asked about the wrong board.
+#[unsafe(no_mangle)]
+pub extern "C" fn rpsfish_root_filter_push(from: i32, to: i32) -> i32 {
+    let square = |index: i32| u8::try_from(index).ok().and_then(Square::new);
+    let (Some(from), Some(to)) = (square(from), square(to)) else {
+        return -2;
+    };
+    with_root_filter(|filter| {
+        filter.push(Move::new(from, to));
+        i32::try_from(filter.len()).unwrap_or(i32::MAX)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -272,16 +406,21 @@ pub extern "C" fn rpsfish_history_push(
     ) else {
         return -2;
     };
-    POSITION_HISTORY.with(|history| {
-        let mut history = history.borrow_mut();
+    with_history(|history| {
         history.push(position.hash());
         i32::try_from(history.len()).unwrap_or(i32::MAX)
     })
 }
 
+/// The shape of this ABI.
+///
+/// Version 4 adds incremental history maintenance (`rpsfish_history_len`,
+/// `rpsfish_history_truncate`) and a root-move restriction
+/// (`rpsfish_root_filter_clear`, `rpsfish_root_filter_push`), which together
+/// let a caller review a whole game without rebuilding state per position.
 #[unsafe(no_mangle)]
 pub extern "C" fn rpsfish_abi_version() -> i32 {
-    3
+    4
 }
 
 /// The rule set this build implements.
@@ -296,12 +435,12 @@ pub extern "C" fn rpsfish_rules_version() -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rpsfish_search_clear() {
-    SEARCHER.with(|searcher| searcher.borrow_mut().clear());
+    with_searcher(Searcher::clear);
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rpsfish_analysis_count() -> i32 {
-    LAST_ANALYSIS.with(|slot| slot.borrow().count)
+    with_last_analysis(|slot| slot.count)
 }
 
 #[unsafe(no_mangle)]
@@ -342,42 +481,42 @@ pub extern "C" fn rpsfish_analysis_pv_to(index: i32, ply: i32) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rpsfish_analysis_score() -> i32 {
-    LAST_ANALYSIS.with(|slot| slot.borrow().score)
+    with_last_analysis(|slot| slot.score)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rpsfish_analysis_depth() -> i32 {
-    LAST_ANALYSIS.with(|slot| slot.borrow().depth)
+    with_last_analysis(|slot| slot.depth)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rpsfish_analysis_selective_depth() -> i32 {
-    LAST_ANALYSIS.with(|slot| slot.borrow().selective_depth)
+    with_last_analysis(|slot| slot.selective_depth)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rpsfish_analysis_confidence() -> i32 {
-    LAST_ANALYSIS.with(|slot| slot.borrow().confidence)
+    with_last_analysis(|slot| slot.confidence)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rpsfish_analysis_nodes() -> i32 {
-    LAST_ANALYSIS.with(|slot| slot.borrow().nodes)
+    with_last_analysis(|slot| slot.nodes)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rpsfish_analysis_elapsed_ms() -> i32 {
-    LAST_ANALYSIS.with(|slot| slot.borrow().elapsed_ms)
+    with_last_analysis(|slot| slot.elapsed_ms)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rpsfish_analysis_stop_reason() -> i32 {
-    LAST_ANALYSIS.with(|slot| slot.borrow().stop_reason)
+    with_last_analysis(|slot| slot.stop_reason)
 }
 
 fn analysis_line(index: i32) -> Option<WasmLine> {
     let index = usize::try_from(index).ok()?;
-    LAST_ANALYSIS.with(|slot| slot.borrow().lines.get(index).copied())
+    with_last_analysis(|slot| slot.lines.get(index).copied())
 }
 
 fn join_halves(low: u64, high: u64) -> u128 {
@@ -420,9 +559,9 @@ fn position_from_abi(
 
 const fn mode_from_code(code: i32) -> Option<Mode> {
     match code {
-        0 => Some(Mode::Annihilation),
         1 => Some(Mode::TotalWar),
         2 => Some(Mode::Infiltration),
+        3 => Some(Mode::Intransitive),
         _ => None,
     }
 }
@@ -444,9 +583,74 @@ const fn stop_reason_code(reason: SearchStopReason) -> i32 {
         SearchStopReason::TerminalPosition => 4,
         SearchStopReason::Repetition => 5,
         SearchStopReason::NoLegalMove => 6,
+        // Appended rather than slotted in beside Repetition, which is where it
+        // belongs by meaning: these numbers are the ABI the worker decodes by
+        // index, so an existing one may never move.
+        SearchStopReason::NoCapture => 7,
     }
 }
 
 // Keep this import used in the ABI layout documentation and make accidental
 // PieceKind reordering visible during compilation.
 const _: [PieceKind; 3] = PieceKind::ALL;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn halves(value: u128) -> [u64; 2] {
+        [value as u64, (value >> 64) as u64]
+    }
+
+    fn encoded(position: &Position) -> [u64; 16] {
+        let mut words = [0_u64; 16];
+        let mut offset = 0;
+        for color in [Color::Red, Color::Blue] {
+            for kind in PieceKind::ALL {
+                let pair = halves(position.piece_bitboard(color, kind));
+                words[offset] = pair[0];
+                words[offset + 1] = pair[1];
+                offset += 2;
+            }
+        }
+        for color in [Color::Red, Color::Blue] {
+            let pair = halves(position.territory_bitboard(color));
+            words[offset] = pair[0];
+            words[offset + 1] = pair[1];
+            offset += 2;
+        }
+        words
+    }
+
+    #[test]
+    fn c_abi_round_trips_every_starting_position() {
+        for (code, mode) in [
+            (1, Mode::TotalWar),
+            (2, Mode::Infiltration),
+            (3, Mode::Intransitive),
+        ] {
+            let position = Position::starting(mode);
+            let side = i32::from(position.side_to_move() == Color::Blue);
+            let decoded = position_from_abi(code, side, 0, encoded(&position))
+                .expect("built-in mode must be accepted by the ABI");
+            assert_eq!(decoded, position, "{mode} must survive the ABI");
+        }
+    }
+
+    #[test]
+    fn c_abi_rejects_unknown_modes_and_invalid_squares() {
+        assert_eq!(position_from_abi(99, 0, 0, [0; 16]), Err(()));
+        rpsfish_root_filter_clear();
+        assert_eq!(rpsfish_root_filter_push(-1, 0), -2);
+        assert_eq!(
+            rpsfish_root_filter_push(0, i32::from(crate::SQUARE_COUNT)),
+            -2
+        );
+    }
+
+    #[test]
+    fn c_abi_versions_match_the_core() {
+        assert_eq!(rpsfish_abi_version(), 4);
+        assert_eq!(rpsfish_rules_version(), crate::RULES_VERSION as i32);
+    }
+}

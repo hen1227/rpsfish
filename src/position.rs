@@ -20,21 +20,10 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::board::{BLUE_TARGET_MASK, RED_TARGET_MASK};
-use crate::model::{Color, EndReason, GameOutcome, Mode, Move, Piece, PieceKind, Square};
-use crate::{BOARD_MASK, BOARD_SIZE, SQUARE_COUNT};
-
-const ANNIHILATION_ROWS: [&str; 9] = [
-    ".........",
-    ".........",
-    ".........",
-    ".R.....s.",
-    ".P.....p.",
-    ".S.....r.",
-    ".........",
-    ".........",
-    ".........",
-];
+use crate::model::{
+    Color, EndReason, GameOutcome, Mode, Move, Piece, PieceKind, QUIET_PLY_LIMIT, Square, Transform,
+};
+use crate::{BOARD_MASK, BOARD_SIZE, FIRST_TO_MOVE, SQUARE_COUNT};
 
 const LARGE_ARMY_ROWS: [&str; 9] = [
     "...SSS...",
@@ -46,6 +35,34 @@ const LARGE_ARMY_ROWS: [&str; 9] = [
     "...rrr...",
     "...ppp...",
     "...sss...",
+];
+
+/// Intransitive's opening, copied from `intransitiveStartingPosition` in the
+/// Go rules and held to it by `starting_positions_match_current_go_layouts`.
+///
+/// Two wedges facing across the long diagonal rather than two blocks facing
+/// across the middle, because the race runs corner to corner. Each side is
+/// banded by kind along the diagonal it advances on: Scissors in front, then
+/// Paper, then Rock at the back guarding the corner the enemy is running at.
+/// Blue's wedge is banked in front of a1 and Red's in front of i9, so Blue's
+/// rocks sit on the diagonal that cuts off the corner Red is running at.
+///
+/// That banking is the mode's whole opening problem in one picture. The two
+/// front lines are both Scissors and cannot capture each other, so nothing is
+/// hanging on move one; behind that, each side's Rock guards its own corner
+/// and is beaten only by the enemy's Paper, and each side's Scissors is what
+/// answers that Paper. Every piece is the answer to the piece behind the piece
+/// it faces, which is the cycle the mode is named for.
+const DIAGONAL_WEDGE_ROWS: [&str; 9] = [
+    ".........",
+    "...RP....",
+    "..RPS....",
+    ".RPS.....",
+    ".PS...sp.",
+    ".....spr.",
+    "....spr..",
+    "....pr...",
+    ".........",
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,6 +98,19 @@ pub struct Position {
     piece_counts: [u8; 2],
     territory_counts: [u8; 2],
     ply: u16,
+    /// Plies played since the last capture, against [`QUIET_PLY_LIMIT`].
+    ///
+    /// Deliberately absent from `hash`, the way a chess engine leaves the
+    /// halfmove clock out of its Zobrist key: two paths that reach the same
+    /// board with different counts are the same position to evaluate and to
+    /// order moves for, and giving them separate transposition entries would
+    /// cost far more than the handful of nodes near the limit it would fix.
+    ///
+    /// Zero on a position read from a FEN, because a FEN does not carry it.
+    /// The RPSI `position` command sends the board a game began from plus every
+    /// move since, so a live game replays the count exactly; see
+    /// `replay_line` in `main.rs`.
+    quiet_plies: u16,
     hash: u64,
 }
 
@@ -121,6 +151,7 @@ pub struct Undo {
     claimed_territory: bool,
     previous_side: Color,
     previous_ply: u16,
+    previous_quiet_plies: u16,
     previous_hash: u64,
 }
 
@@ -148,6 +179,7 @@ pub enum PositionError {
     WrongRowCount { actual: usize },
     WrongRowWidth { row: usize, actual: usize },
     InvalidSymbol { symbol: char, x: usize, y: usize },
+    MalformedFen { detail: &'static str },
     PieceOverlap,
     TerritoryOverlap,
     BitsOutsideBoard,
@@ -166,6 +198,7 @@ impl fmt::Display for PositionError {
             Self::InvalidSymbol { symbol, x, y } => {
                 write!(formatter, "invalid board symbol {symbol:?} at ({x}, {y})")
             }
+            Self::MalformedFen { detail } => write!(formatter, "malformed FEN: {detail}"),
             Self::PieceOverlap => formatter.write_str("piece bitboards overlap"),
             Self::OccupancyDesynchronized => {
                 formatter.write_str("cached occupancy does not match the piece bitboards")
@@ -199,10 +232,11 @@ impl Position {
     #[must_use]
     pub fn starting(mode: Mode) -> Self {
         let rows = match mode {
-            Mode::Annihilation => &ANNIHILATION_ROWS,
             Mode::TotalWar | Mode::Infiltration => &LARGE_ARMY_ROWS,
+            Mode::Intransitive => &DIAGONAL_WEDGE_ROWS,
         };
-        Self::from_rows(mode, Color::Red, rows).expect("embedded starting position must be valid")
+        Self::from_rows(mode, FIRST_TO_MOVE, rows)
+            .expect("embedded starting position must be valid")
     }
 
     pub fn from_rows(
@@ -265,6 +299,99 @@ impl Position {
         Self::from_bitboards(mode, side_to_move, pieces, territory, 0)
     }
 
+    /// Parse the game-record FEN the server stores alongside every game.
+    ///
+    /// Three space-separated fields: the board, the side to move, and
+    /// territory ownership. Both grids are nine `/`-separated ranks written
+    /// from rank 1 (Blue's home boundary, `y == 0`) upward, matching
+    /// [`Position::from_rows`], with digits standing for runs of empty or
+    /// unclaimed squares. The territory field may be omitted for a mode that
+    /// does not track it.
+    ///
+    /// This exists so a position from a real game can be pasted into a test or
+    /// a position suite as the record already wrote it, rather than being
+    /// transcribed into nine row strings by hand.
+    pub fn from_fen(mode: Mode, fen: &str) -> Result<Self, PositionError> {
+        let mut fields = fen.split_whitespace();
+        let board = fields
+            .next()
+            .ok_or(PositionError::MalformedFen { detail: "empty" })?;
+        let side = fields.next().ok_or(PositionError::MalformedFen {
+            detail: "missing side to move",
+        })?;
+        let territory_field = fields.next();
+        if fields.next().is_some() {
+            return Err(PositionError::MalformedFen {
+                detail: "trailing field",
+            });
+        }
+
+        let side_to_move = match side {
+            "r" | "R" => Color::Red,
+            "b" | "B" => Color::Blue,
+            _ => {
+                return Err(PositionError::MalformedFen {
+                    detail: "side to move must be r or b",
+                });
+            }
+        };
+
+        let board_rows = expand_fen_grid(board)?;
+        let rows: Vec<&str> = board_rows.iter().map(String::as_str).collect();
+        let mut position = Self::from_rows(mode, side_to_move, &rows)?;
+
+        if let Some(field) = territory_field {
+            let mut territory = [0_u128; 2];
+            for (y, row) in expand_fen_grid(field)?.iter().enumerate() {
+                for (x, symbol) in row.chars().enumerate() {
+                    let color = match symbol {
+                        '.' => continue,
+                        'r' => Color::Red,
+                        'b' => Color::Blue,
+                        _ => return Err(PositionError::InvalidSymbol { symbol, x, y }),
+                    };
+                    let square = Square::from_xy(x as u8, y as u8)
+                        .expect("validated coordinates must form a square");
+                    territory[color.index()] |= square.bit();
+                }
+            }
+            position = Self::from_bitboards(mode, side_to_move, position.pieces, territory, 0)?;
+        }
+        Ok(position)
+    }
+
+    /// Write this position in the same FEN the game record uses.
+    ///
+    /// Round-trips through [`Position::from_fen`] for every mode; the ply
+    /// counter is not part of the format and does not survive.
+    #[must_use]
+    pub fn to_fen(&self) -> String {
+        let board = compress_fen_grid(|square| {
+            self.piece_at(square).map(|piece| {
+                let symbol = match piece.kind {
+                    PieceKind::Rock => 'r',
+                    PieceKind::Paper => 'p',
+                    PieceKind::Scissors => 's',
+                };
+                match piece.color {
+                    Color::Red => symbol,
+                    Color::Blue => symbol.to_ascii_uppercase(),
+                }
+            })
+        });
+        let side = match self.side_to_move {
+            Color::Red => 'r',
+            Color::Blue => 'b',
+        };
+        let territory = compress_fen_grid(|square| {
+            self.territory_owner(square).map(|color| match color {
+                Color::Red => 'r',
+                Color::Blue => 'b',
+            })
+        });
+        format!("{board} {side} {territory}")
+    }
+
     pub fn from_bitboards(
         mode: Mode,
         side_to_move: Color,
@@ -307,6 +434,10 @@ impl Position {
                 territory[1].count_ones() as u8,
             ],
             ply,
+            // A board handed over on its own carries no history, so nothing is
+            // known to have gone uncaptured. Replaying a line from here is what
+            // fills this in; see the field's own note.
+            quiet_plies: 0,
             hash: 0,
         };
         position.validate()?;
@@ -374,6 +505,24 @@ impl Position {
     #[must_use]
     pub const fn ply(&self) -> u16 {
         self.ply
+    }
+
+    /// Plies played since the last capture.
+    #[must_use]
+    pub const fn quiet_plies(&self) -> u16 {
+        self.quiet_plies
+    }
+
+    /// Whether this position has run out the no-capture draw.
+    ///
+    /// A weaker claim than it looks, and deliberately the last thing any caller
+    /// asks: it says only that nothing has been taken for a long time, so a
+    /// position that is *also* won, blockaded, or a third repetition is that
+    /// instead. [`Position::adjudicate`] orders the two, and so does
+    /// `countQuietPlyLocked` in the Go backend.
+    #[must_use]
+    pub const fn quiet_limit_reached(&self) -> bool {
+        self.quiet_plies >= QUIET_PLY_LIMIT
     }
 
     #[must_use]
@@ -538,7 +687,6 @@ impl Position {
         let blue_count = self.piece_count(Color::Blue);
 
         match self.mode {
-            Mode::Annihilation => zero_piece_outcome(red_count, blue_count),
             Mode::TotalWar => {
                 if let Some(outcome) = zero_piece_outcome(red_count, blue_count) {
                     return Some(outcome);
@@ -558,19 +706,30 @@ impl Position {
                 }
                 None
             }
-            Mode::Infiltration => {
+            // One arm for both goal modes: they differ in the shape of the
+            // goal and in the name the win goes under, and in nothing else.
+            // The shape comes from the rules table and the name from the mode,
+            // so a third goal mode would add neither branch nor line here.
+            Mode::Infiltration | Mode::Intransitive => {
+                let goal = self.mode.rules().goal;
+                let reason = match self.mode {
+                    Mode::Intransitive => EndReason::Corner,
+                    _ => EndReason::Infiltration,
+                };
+                // The side that just moved is checked first, so a move onto
+                // one's own goal wins even in the position where the other
+                // side is also standing on theirs. Such a position is not
+                // reachable in a real game -- the first arrival ends it -- but
+                // a suite or a book may hand one over, and search must not see
+                // the answer flip with the side to move.
                 let previous = self.side_to_move.other();
-                if (previous == Color::Red && self.occupied_by(Color::Red) & RED_TARGET_MASK != 0)
-                    || (previous == Color::Blue
-                        && self.occupied_by(Color::Blue) & BLUE_TARGET_MASK != 0)
-                {
-                    return Some(GameOutcome::win(previous, EndReason::Infiltration));
+                if self.occupied_by(previous) & goal.mask(previous) != 0 {
+                    return Some(GameOutcome::win(previous, reason));
                 }
-                if self.occupied_by(Color::Red) & RED_TARGET_MASK != 0 {
-                    return Some(GameOutcome::win(Color::Red, EndReason::Infiltration));
-                }
-                if self.occupied_by(Color::Blue) & BLUE_TARGET_MASK != 0 {
-                    return Some(GameOutcome::win(Color::Blue, EndReason::Infiltration));
+                for color in Color::ALL {
+                    if self.occupied_by(color) & goal.mask(color) != 0 {
+                        return Some(GameOutcome::win(color, reason));
+                    }
                 }
                 None
             }
@@ -579,31 +738,53 @@ impl Position {
 
     /// Whether the side to move has no legal move in an undecided position.
     ///
-    /// Stalemate is an official draw in every mode, so this is a terminal
-    /// test rather than a search setting.
+    /// A terminal test rather than a search setting: every mode ends the game
+    /// here. Which result it is belongs to [`ModeRules::stalemate_loses`], so
+    /// this answers only that the game is over -- see [`Position::adjudicate`].
     #[must_use]
     pub fn is_stalemate(&self) -> bool {
         self.outcome().is_none() && !self.has_any_legal_move(self.side_to_move)
     }
 
-    /// The complete terminal result for this position, including stalemate.
+    /// The complete terminal result for this position, including stalemate and
+    /// the no-capture draw.
     ///
     /// Repetition remains path-dependent and is therefore owned by the caller
     /// that knows the game history.
+    ///
+    /// The order is the rules': what the mode decides, then whether the side to
+    /// move is stuck, then the no-capture draw. Reversing the last two would
+    /// turn a blockade on the hundredth quiet move -- a win in a mode where
+    /// being stuck loses -- into half a point.
     #[must_use]
     pub fn adjudicate(&self) -> Option<GameOutcome> {
-        self.outcome().or_else(|| {
-            (!self.has_any_legal_move(self.side_to_move))
-                .then(|| GameOutcome::draw(EndReason::Stalemate))
-        })
+        self.outcome()
+            .or_else(|| {
+                if self.has_any_legal_move(self.side_to_move) {
+                    return None;
+                }
+                Some(if self.mode.rules().stalemate_loses {
+                    GameOutcome::win(self.side_to_move.other(), EndReason::Stalemate)
+                } else {
+                    GameOutcome::draw(EndReason::Stalemate)
+                })
+            })
+            .or_else(|| {
+                self.quiet_limit_reached()
+                    .then(|| GameOutcome::draw(EndReason::NoCapture))
+            })
     }
 
     /// The position with colours swapped and the board flipped about the
-    /// midline, mapping each side onto the other's geometry exactly.
+    /// midline.
     ///
-    /// Red advances toward `y == 0` and Blue toward `y == BOARD_SIZE - 1`, so a
-    /// vertical flip plus a colour swap is a true symmetry of every current
-    /// mode. Evaluation must be invariant under it.
+    /// Red advances toward `y == 0` and Blue toward `y == BOARD_SIZE - 1`, so
+    /// this maps each side's ranks onto the other's. That is the whole story
+    /// where a goal is a rank or absent, and evaluation is invariant under it
+    /// there. It is *not* the whole story for a corner goal, which names a
+    /// file too: this carries Red's corner onto the wrong end of Blue's rank,
+    /// and [`Transform::HALF_TURN`] is the member that gets it right. Ask
+    /// [`crate::model::ModeRules::symmetries`] before folding with it.
     #[must_use]
     pub fn mirrored(&self) -> Self {
         let mut pieces = [[0_u128; 3]; 2];
@@ -625,6 +806,118 @@ impl Position {
             self.ply,
         )
         .expect("mirroring a valid position must stay valid")
+    }
+
+    /// The position with files reversed (`x -> BOARD_SIZE - 1 - x`).
+    ///
+    /// Colours and the side to move are untouched: reversing files is a
+    /// symmetry of the board's *geometry* alone, since neighbourhoods are
+    /// eight-connected. Whether it is a symmetry of the rules depends on the
+    /// mode. Infiltration's target rows are whole rows and Total War has no
+    /// goal at all, so there it maps every legal move onto a legal move of the
+    /// same value; Intransitive's corner moves to the far file, so there it
+    /// does not. [`crate::model::ModeRules::symmetries`] is the authority.
+    #[must_use]
+    pub fn flipped_horizontally(&self) -> Self {
+        let mut pieces = [[0_u128; 3]; 2];
+        for color in Color::ALL {
+            for kind in PieceKind::ALL {
+                pieces[color.index()][kind.index()] =
+                    flip_horizontal(self.piece_bitboard(color, kind));
+            }
+        }
+        let territory = [
+            flip_horizontal(self.territory_bitboard(Color::Red)),
+            flip_horizontal(self.territory_bitboard(Color::Blue)),
+        ];
+        Self::from_bitboards(self.mode, self.side_to_move, pieces, territory, self.ply)
+            .expect("reversing the files of a valid position must stay valid")
+    }
+
+    /// Apply one member of the symmetry group.
+    #[must_use]
+    pub fn transformed(&self, transform: Transform) -> Self {
+        let mut result = *self;
+        if transform.reverses_files() {
+            result = result.flipped_horizontally();
+        }
+        if transform.swaps_colors() {
+            result = result.mirrored();
+        }
+        result
+    }
+
+    /// The representative of this position's symmetry class, and the transform
+    /// that produces it.
+    ///
+    /// Every position in a class canonicalizes to the same representative, so
+    /// an opening book keyed on the representative's hash merges lines that
+    /// reach the same board picture by different move orders, from either
+    /// colour's point of view. Ties go to the lowest transform code, which is
+    /// what makes the answer deterministic for a position that is invariant
+    /// under part of the group -- the Infiltration starting position is
+    /// invariant under all of it.
+    #[must_use]
+    pub fn canonical(&self) -> (Self, Transform) {
+        self.canonical_over(self.mode.rules().symmetries())
+    }
+
+    /// The representative of this position's class under a subset of the
+    /// group, and the transform that produces it.
+    ///
+    /// A book folds by whichever subset actually merges positions in the mode
+    /// it covers, so the subset is a stored setting rather than a constant.
+    /// `transforms` must contain [`Transform::IDENTITY`] and be closed under
+    /// composition, or two members of a class can disagree about their
+    /// representative.
+    #[must_use]
+    pub fn canonical_over(&self, transforms: &[Transform]) -> (Self, Transform) {
+        // A caller may ask for any subset of the geometry's group; only the
+        // subset this mode's *rules* admit is sound to fold by. Intersecting
+        // here rather than at each caller is deliberate -- this is the single
+        // point every fold passes through, so a mode whose goal names a file
+        // cannot be merged with its mirror by any path, including an opening
+        // book that was configured before the mode existed. Asking for more
+        // than a mode allows silently gets less, which costs merging and never
+        // correctness.
+        let allowed = self.mode.rules().symmetries();
+        let mut best = *self;
+        let mut best_transform = Transform::IDENTITY;
+        let mut best_key = best.symmetry_key();
+        for &transform in transforms {
+            if transform == Transform::IDENTITY || !allowed.contains(&transform) {
+                continue;
+            }
+            let candidate = self.transformed(transform);
+            let key = candidate.symmetry_key();
+            if key < best_key {
+                best = candidate;
+                best_transform = transform;
+                best_key = key;
+            }
+        }
+        (best, best_transform)
+    }
+
+    /// A total order on board pictures, for choosing a class representative.
+    ///
+    /// Deliberately not the Zobrist hash: two distinct images colliding would
+    /// silently pick a representative that depends on which member you started
+    /// from, and every stored line under that key would then disagree.
+    fn symmetry_key(&self) -> ([u128; 8], usize) {
+        (
+            [
+                self.pieces[0][0],
+                self.pieces[0][1],
+                self.pieces[0][2],
+                self.pieces[1][0],
+                self.pieces[1][1],
+                self.pieces[1][2],
+                self.territory[0],
+                self.territory[1],
+            ],
+            self.side_to_move.index(),
+        )
     }
 
     pub fn make_move(&mut self, movement: Move) -> Result<Undo, MoveError> {
@@ -651,6 +944,7 @@ impl Position {
             claimed_territory,
             previous_side: self.side_to_move,
             previous_ply: self.ply,
+            previous_quiet_plies: self.quiet_plies,
             previous_hash: self.hash,
         };
 
@@ -677,6 +971,14 @@ impl Position {
         self.side_to_move = self.side_to_move.other();
         self.hash ^= side_key();
         self.ply = self.ply.saturating_add(1);
+        // A capture and nothing else. Claiming a tile is progress in Total War
+        // but not progress this rule counts, because the mode already ends the
+        // game on it when the board fills; the Go backend counts the same way.
+        self.quiet_plies = if undo.captured.is_some() {
+            0
+        } else {
+            self.quiet_plies.saturating_add(1)
+        };
         undo
     }
 
@@ -708,6 +1010,7 @@ impl Position {
         }
         self.side_to_move = undo.previous_side;
         self.ply = undo.previous_ply;
+        self.quiet_plies = undo.previous_quiet_plies;
         self.hash = undo.previous_hash;
     }
 
@@ -760,6 +1063,72 @@ impl Position {
     }
 }
 
+/// Expand one `/`-separated FEN grid into nine nine-character rows.
+///
+/// Digits are runs of unoccupied or unclaimed squares. Row zero is rank 1, the
+/// same order [`Position::from_rows`] uses, so both callers agree on which end
+/// of the board a record starts from.
+fn expand_fen_grid(field: &str) -> Result<Vec<String>, PositionError> {
+    let mut rows = Vec::with_capacity(usize::from(BOARD_SIZE));
+    for (index, row) in field.split('/').enumerate() {
+        let mut expanded = String::with_capacity(usize::from(BOARD_SIZE));
+        for symbol in row.chars() {
+            match symbol.to_digit(10) {
+                Some(run) if run > 0 => {
+                    for _ in 0..run {
+                        expanded.push('.');
+                    }
+                }
+                Some(_) => {
+                    return Err(PositionError::MalformedFen {
+                        detail: "zero-length run",
+                    });
+                }
+                None => expanded.push(symbol),
+            }
+        }
+        if expanded.chars().count() != usize::from(BOARD_SIZE) {
+            return Err(PositionError::WrongRowWidth {
+                row: index,
+                actual: expanded.chars().count(),
+            });
+        }
+        rows.push(expanded);
+    }
+    if rows.len() != usize::from(BOARD_SIZE) {
+        return Err(PositionError::WrongRowCount { actual: rows.len() });
+    }
+    Ok(rows)
+}
+
+/// Render a per-square symbol table back into a `/`-separated FEN grid.
+fn compress_fen_grid(symbol_at: impl Fn(Square) -> Option<char>) -> String {
+    let mut result = String::new();
+    for y in 0..BOARD_SIZE {
+        if y > 0 {
+            result.push('/');
+        }
+        let mut run = 0_u32;
+        for x in 0..BOARD_SIZE {
+            let square = Square::from_xy(x, y).expect("board coordinates must form a square");
+            match symbol_at(square) {
+                Some(symbol) => {
+                    if run > 0 {
+                        result.push(char::from_digit(run, 10).expect("run fits one digit"));
+                        run = 0;
+                    }
+                    result.push(symbol);
+                }
+                None => run += 1,
+            }
+        }
+        if run > 0 {
+            result.push(char::from_digit(run, 10).expect("run fits one digit"));
+        }
+    }
+    result
+}
+
 fn fold_kinds(boards: &[u128; 3]) -> u128 {
     boards[0] | boards[1] | boards[2]
 }
@@ -770,6 +1139,23 @@ fn flip_vertical(board: u128) -> u128 {
     for y in 0..BOARD_SIZE {
         let row = (board >> (y * BOARD_SIZE)) & ((1_u128 << BOARD_SIZE) - 1);
         result |= row << ((BOARD_SIZE - 1 - y) * BOARD_SIZE);
+    }
+    result
+}
+
+/// Reflect a bitboard about the vertical midline (`x -> BOARD_SIZE - 1 - x`).
+fn flip_horizontal(board: u128) -> u128 {
+    let row_mask = (1_u128 << BOARD_SIZE) - 1;
+    let mut result = 0_u128;
+    for y in 0..BOARD_SIZE {
+        let row = (board >> (y * BOARD_SIZE)) & row_mask;
+        let mut reversed = 0_u128;
+        for x in 0..BOARD_SIZE {
+            if row & (1 << x) != 0 {
+                reversed |= 1 << (BOARD_SIZE - 1 - x);
+            }
+        }
+        result |= reversed << (y * BOARD_SIZE);
     }
     result
 }
@@ -797,10 +1183,18 @@ const FEATURE_KEYS: [[u64; SQUARE_COUNT as usize]; FEATURE_COUNT] = build_featur
 
 const SIDE_KEY: u64 = splitmix64(0x7f4a_7c15_d1b5_4a32);
 
-const MODE_KEYS: [u64; 3] = [
+/// Hash keys indexed by a mode's *wire code*, not by its position in
+/// [`Mode::ALL`].
+///
+/// So the table needs one entry per code and a dead entry at zero, which the
+/// retired Annihilation mode left behind. Entries are only ever appended:
+/// changing one would change every stored position key and every opening book
+/// built under it. `mode_keys_cover_every_mode` holds the length to the codes.
+const MODE_KEYS: [u64; 4] = [
     splitmix64(0x94d0_49bb_1331_11eb),
     splitmix64(0x94d0_49bb_1331_11eb ^ 1),
     splitmix64(0x94d0_49bb_1331_11eb ^ 2),
+    splitmix64(0x94d0_49bb_1331_11eb ^ 3),
 ];
 
 const fn build_feature_keys() -> [[u64; SQUARE_COUNT as usize]; FEATURE_COUNT] {
@@ -858,16 +1252,151 @@ mod tests {
 
     #[test]
     fn starting_positions_match_current_go_layouts() {
-        let annihilation = Position::starting(Mode::Annihilation);
-        assert_eq!(annihilation.piece_count(Color::Red), 3);
-        assert_eq!(annihilation.piece_count(Color::Blue), 3);
-
         for mode in [Mode::TotalWar, Mode::Infiltration] {
             let position = Position::starting(mode);
             assert_eq!(position.piece_count(Color::Red), 9);
             assert_eq!(position.piece_count(Color::Blue), 9);
             assert_eq!(position.territory_count(Color::Red), 9);
             assert_eq!(position.territory_count(Color::Blue), 9);
+        }
+        for mode in Mode::ALL {
+            assert_eq!(
+                Position::starting(mode).side_to_move(),
+                FIRST_TO_MOVE,
+                "{mode} must open with the side the Go rules open with"
+            );
+        }
+    }
+
+    /// Which corner each side wins on, read off the opening rather than
+    /// restated, so mirroring the layout without moving the masks -- or the
+    /// reverse -- fails here rather than in a game.
+    ///
+    /// The twin of `TestVersion6GoalCornersAreTheEnemyHomeCorners` in the Go
+    /// rules, and the reason the two can be checked separately: each side's
+    /// wedge is banked in front of its *own* corner, so the corner a side
+    /// defends is the one nearer its own army, and the corner it runs at is the
+    /// other one.
+    #[test]
+    fn the_intransitive_wedges_are_banked_in_front_of_their_own_corners() {
+        let start = Position::starting(Mode::Intransitive);
+        let goal = Mode::Intransitive.rules().goal;
+        assert_eq!(start.piece_count(Color::Red), 10);
+        assert_eq!(start.piece_count(Color::Blue), 10);
+
+        for color in Color::ALL {
+            // Nobody opens standing on a goal, or the game would be over.
+            assert_eq!(start.occupied_by(color) & goal.mask(color), 0);
+
+            let own = goal.mask(color.other());
+            let enemy = goal.mask(color);
+            let (mut near, mut far) = (0_i32, 0_i32);
+            for index in 0..usize::from(SQUARE_COUNT) {
+                if start.occupied_by(color) & (1_u128 << index) == 0 {
+                    continue;
+                }
+                near += chebyshev(index, own);
+                far += chebyshev(index, enemy);
+            }
+            assert!(
+                near < far,
+                "{color}'s army is not banked in front of the corner it defends"
+            );
+        }
+    }
+
+    /// Chebyshev distance from a square index to a single-square mask.
+    fn chebyshev(index: usize, mask: u128) -> i32 {
+        let target = mask.trailing_zeros() as usize;
+        let size = usize::from(BOARD_SIZE);
+        let (x, y) = (index % size, index / size);
+        let (tx, ty) = (target % size, target / size);
+        let dx = (x as i32 - tx as i32).abs();
+        let dy = (y as i32 - ty as i32).abs();
+        dx.max(dy)
+    }
+
+    #[test]
+    fn mode_keys_cover_every_mode_and_separate_them() {
+        // The bug this exists for: `MODE_KEYS` is indexed by the wire code, so
+        // adding a mode with a new code overruns it, and the failure surfaces
+        // as a panic in half the suite rather than as anything about modes.
+        for mode in Mode::ALL {
+            assert!(
+                (mode as usize) < MODE_KEYS.len(),
+                "{mode} has wire code {} and MODE_KEYS holds {}",
+                mode as usize,
+                MODE_KEYS.len()
+            );
+        }
+        for (index, mode) in Mode::ALL.into_iter().enumerate() {
+            for other in Mode::ALL.into_iter().skip(index + 1) {
+                assert_ne!(
+                    mode_key(mode),
+                    mode_key(other),
+                    "{mode} and {other} share a hash key"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fen_round_trips_through_every_starting_position() {
+        for mode in Mode::ALL {
+            let position = Position::starting(mode);
+            let fen = position.to_fen();
+            let parsed = Position::from_fen(mode, &fen).expect("own output must parse");
+            assert_eq!(parsed.to_fen(), fen, "{mode} FEN must be stable");
+            assert_eq!(
+                parsed.piece_count(Color::Red),
+                position.piece_count(Color::Red)
+            );
+            assert_eq!(
+                parsed.territory_count(Color::Blue),
+                position.territory_count(Color::Blue)
+            );
+            assert_eq!(parsed.side_to_move(), position.side_to_move());
+        }
+    }
+
+    #[test]
+    fn fen_reads_the_layout_the_game_record_writes() {
+        // The record the server stores for a fresh Total War game, copied out
+        // of backend/docs/pgn.md. Rank 1 is written first and is Blue's home,
+        // so Blue's Scissors lead the board field and Blue's territory leads
+        // the territory field -- and Blue is the side to move, because Blue
+        // opens.
+        let fen = "3SSS3/3PPP3/3RRR3/9/9/9/3rrr3/3ppp3/3sss3 b                    3bbb3/3bbb3/3bbb3/9/9/9/3rrr3/3rrr3/3rrr3";
+        let parsed = Position::from_fen(Mode::TotalWar, fen).expect("record FEN must parse");
+        assert_eq!(parsed, Position::starting(Mode::TotalWar));
+    }
+
+    #[test]
+    fn fen_keeps_territory_that_no_piece_stands_on() {
+        // The distinction `from_rows` cannot express: claimed ground the owner
+        // has since walked away from. Every suite position depends on it.
+        let fen = "9/9/9/9/4r4/9/9/9/9 b rrrrrrrrr/9/9/9/9/9/9/9/bbbbbbbbb";
+        let parsed = Position::from_fen(Mode::TotalWar, fen).expect("must parse");
+        assert_eq!(parsed.piece_count(Color::Red), 1);
+        assert_eq!(parsed.territory_count(Color::Red), 9);
+        assert_eq!(parsed.territory_count(Color::Blue), 9);
+        assert_eq!(parsed.neutral_territory_count(), 63);
+        assert_eq!(parsed.side_to_move(), Color::Blue);
+    }
+
+    #[test]
+    fn malformed_fen_is_rejected_rather_than_guessed_at() {
+        for bad in [
+            "9/9/9/9/9/9/9/9 r",                       // eight ranks
+            "9/9/9/9/8/9/9/9/9 r",                     // a short rank
+            "9/9/9/9/9/9/9/9/9 x",                     // no such side
+            "9/9/9/9/9/9/9/9/9",                       // no side at all
+            "9/9/9/9/9/9/9/9/9 r 9/9/9/9/9/9/9/9/9 9", // a field too many
+        ] {
+            assert!(
+                Position::from_fen(Mode::TotalWar, bad).is_err(),
+                "{bad:?} must not parse"
+            );
         }
     }
 
@@ -910,14 +1439,14 @@ mod tests {
         pieces[Color::Red.index()][PieceKind::Rock.index()] = bit;
         pieces[Color::Blue.index()][PieceKind::Paper.index()] = bit;
         assert_eq!(
-            Position::from_bitboards(Mode::Annihilation, Color::Red, pieces, [0_u128; 2], 0,),
+            Position::from_bitboards(Mode::TotalWar, Color::Red, pieces, [0_u128; 2], 0,),
             Err(PositionError::PieceOverlap)
         );
     }
 
     #[test]
     fn each_mode_reports_its_board_objective() {
-        let annihilation_rows = [
+        let last_piece_rows = [
             ".........",
             ".........",
             ".........",
@@ -928,18 +1457,17 @@ mod tests {
             ".........",
             ".........",
         ];
-        let mut annihilation =
-            Position::from_rows(Mode::Annihilation, Color::Red, &annihilation_rows)
-                .expect("position must parse");
+        let mut last_piece = Position::from_rows(Mode::TotalWar, Color::Red, &last_piece_rows)
+            .expect("position must parse");
         let capture = Move::new(
             Square::from_xy(4, 4).expect("valid square"),
             Square::from_xy(5, 4).expect("valid square"),
         );
-        annihilation
+        last_piece
             .make_move(capture)
             .expect("capture must be legal");
         assert_eq!(
-            annihilation.outcome(),
+            last_piece.outcome(),
             Some(GameOutcome::win(Color::Red, EndReason::Annihilation))
         );
 
