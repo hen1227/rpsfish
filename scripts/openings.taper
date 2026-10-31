@@ -1,0 +1,36 @@
+# Pass two of two: the shape the shipped opening books are built with.
+#
+# Effort belongs where it changes a decision. A first move is worth minutes
+# because every line hangs off it; a position forty plies into a sideline is
+# worth a fraction of a second, because by then the question is whether the
+# line survives at all rather than exactly how well it stands.
+#
+# Margins narrow with depth for the same reason. Near the start, a move 55
+# behind best is a real alternative worth having an answer to. Forty plies in,
+# a line that far behind is not going to be played. Regret accumulates along a
+# line and margins only shrink, so a line that spent 50 of its budget early is
+# cut off long before ply 50 -- which is what keeps the deep part of the book
+# narrow without any explicit width rule.
+#
+# This is steeper than `deep.taper`, the built-in shape, in the band that
+# matters: `deep.taper` charges 300M nodes for every ply from 0 to 6, and the
+# frontier is ordered by regret rather than by ply, so a batch is one main-line
+# tip plus its cheapest siblings. That means the main line advances *one ply
+# per batch* no matter how big the batch is. Paying 300M a position through
+# ply 6 buys about six plies of main line for the whole budget; paying it only
+# through ply 1 buys fifty, and the plies that got cheaper are the ones whose
+# breadth was going to be truncated by the export width anyway.
+#
+# The first two bands are the survey's bands (see `survey.taper`) rounded down,
+# so a survey already run is not paid for twice.
+#
+# ply  nodes        multipv  margin
+0      400000000    8        55
+2      150000000    7        45
+4       50000000    6        38
+7       22000000    5        32
+11      10000000    4        26
+16       5000000    3        20
+23       2500000    3        15
+32       1200000    2        11
+42        700000    2         8

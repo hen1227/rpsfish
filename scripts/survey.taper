@@ -1,0 +1,26 @@
+# Pass one of two: rank every opening move, and only that.
+#
+# The root is searched at MultiPV 36 -- every legal opening in every mode -- so
+# that each one becomes an edge and therefore a position the book can expand.
+# 23 was "every legal opening" while the only two modes shared a starting
+# position; Intransitive opens from two diagonal wedges of ten pieces and has
+# 36, so 23 there silently left the last thirteen openings with no edge, no
+# node, and therefore no book at all if the opponent played one of them. A mode
+# with fewer legal openings than this simply ranks all it has. Its own scores barely matter: as soon as a child is analyzed, the
+# child's value replaces the estimate that reached it. So the root gets only
+# enough budget to rank moves, and the real budget goes to the positions they
+# reach, where twelve threads can work at once instead of one.
+#
+# The ply-1 margin is deliberately wide. A survey is supposed to look at every
+# opening, including the ones it expects to refute.
+#
+# Run this with `--max-ply 1` and hand ply 2 onwards to `openings.taper`. The
+# two files interlock: every band here is at least as generous as the band
+# `openings.taper` gives the same ply, in nodes *and* in MultiPV, so the deep
+# pass does not re-queue what the survey already paid for. Loosen a number here
+# and nothing breaks; tighten one below `openings.taper` and the deep pass
+# quietly buys the same twelve positions twice.
+#
+# ply  nodes        multipv  margin
+0      500000000    36       400
+1      600000000    8        70

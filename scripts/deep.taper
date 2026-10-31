@@ -1,0 +1,18 @@
+# The shape the book binary uses when no --taper is given, written out so it
+# can be edited rather than recompiled.
+#
+# Effort belongs where it changes a decision. A first move is worth minutes
+# because every line hangs off it; a position forty plies into a sideline is
+# worth a second, because by then the question is whether the line survives at
+# all rather than exactly how well it stands.
+#
+# Margins narrow with depth for the same reason. Near the start, a move 60
+# behind best is a real alternative worth having an answer to. Forty plies in,
+# a line that far behind is not going to be played.
+#
+# ply  nodes        multipv  margin
+0      300000000    8        60
+7      60000000     6        45
+15     20000000     4        30
+25     6000000      3        20
+37     2000000      2        12

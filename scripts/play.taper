@@ -1,0 +1,33 @@
+# The shape a book is built with when something is going to *play* from it.
+#
+# `openings.taper` is built for breadth, because its consumer is the website's
+# opening explorer: a reader wants to know what happens down every plausible
+# line, and forty plies in the question is whether a line survives rather than
+# exactly how well it stands. Spending 400M nodes on a first move and 5M on a
+# fortieth is the right answer to that question.
+#
+# It is the wrong answer for an engine at a clock. A book move is only worth
+# playing where the book looked *harder* at the position than the engine is
+# about to -- `RpsiSession::book_move` enforces exactly that by comparing node
+# counts -- and a 5+3 game buys the engine something like 70M nodes on its
+# first move, declining to roughly 25M by move thirty as the clock converges on
+# the increment. Against `openings.taper` that comparison fails from about ply
+# 4 onward: the book's 50M band loses to a live 63M search, and everything
+# deeper loses by more. A book built that way is *usable for three moves*.
+#
+# So every band here is above what a 5+3 clock can buy at the ply it covers,
+# and the book pays for that in width. It is narrow and deep where the other
+# one is broad and shallow, and it follows the main lines because the frontier
+# is ordered by regret rather than by ply. Falling out of a narrow book is not
+# a failure: the engine searches, which is what it did everywhere before.
+#
+# Plies 0 and 1 are `survey.taper`'s own bands exactly, in nodes and in
+# MultiPV, so a survey already run is not paid for twice.
+#
+# ply  nodes        multipv  margin
+0      500000000    36       400
+1      600000000    8        70
+2      250000000    6        45
+6      150000000    5        35
+12     120000000    4        25
+20     100000000    3        18
