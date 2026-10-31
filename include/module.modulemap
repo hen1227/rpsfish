@@ -1,0 +1,4 @@
+module RPSFish {
+  header "RPSFish.h"
+  export *
+}
