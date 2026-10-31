@@ -23,7 +23,18 @@ set -eu
 
 RPSFISH_SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 RPSFISH_ENGINE_DIR=$(dirname -- "$RPSFISH_SCRIPT_DIR")
-RPSFISH_WEB_DIR=$(dirname -- "$RPSFISH_ENGINE_DIR")/frontend/public/rpsfish
+
+# Where the built wasm is staged. The website fetches it from its own static
+# folder at runtime, so a build that does not land there has not been deployed —
+# and because the copy below creates whatever directory it is given, a build
+# staged into the wrong place succeeds loudly and serves nothing, which is the
+# worst way for a path to be wrong.
+#
+# The default assumes the website is checked out beside this repository, which
+# is how the two were laid out when they lived in one tree. RPSFISH_WEB_DIR
+# overrides it for every other arrangement, and is what the website's own
+# deploy-engine.sh sets rather than leaving the guess to be right by luck.
+RPSFISH_WEB_DIR=${RPSFISH_WEB_DIR:-$(dirname -- "$RPSFISH_ENGINE_DIR")/frontend/public/rpsfish}
 
 if command -v rustup >/dev/null 2>&1; then
   RPSFISH_CARGO=$(rustup which cargo)

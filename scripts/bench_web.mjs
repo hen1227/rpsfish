@@ -36,8 +36,8 @@ const maxDepth = Number(argument('depth', 40));
 const throttleMs = Number(argument('throttle', 0));
 const variations = Number(argument('multipv', 1));
 
-const ANNIHILATION = ['.........', '.........', '.........', '.R.....s.', '.P.....p.', '.S.....r.', '.........', '.........', '.........'];
 const LARGE_ARMY = ['...SSS...', '...PPP...', '...RRR...', '.........', '.........', '.........', '...rrr...', '...ppp...', '...sss...'];
+const CORNER_ARMY = ['.........', '...RP....', '..RPS....', '.RPS.....', '.PS...sp.', '.....spr.', '....spr..', '....pr...', '.........'];
 const OFFSETS = { r: 0, p: 1, s: 2, R: 3, P: 4, S: 5 };
 
 const encode = (rows, side, mode) => {
@@ -56,9 +56,9 @@ const encode = (rows, side, mode) => {
 };
 
 const suite = [
-  { name: 'Annihilation', encoded: encode(ANNIHILATION, 0, 0) },
-  { name: 'Total War', encoded: encode(LARGE_ARMY, 0, 1) },
-  { name: 'Infiltration', encoded: encode(LARGE_ARMY, 0, 2) },
+  { name: 'Total War', encoded: encode(LARGE_ARMY, 1, 1) },
+  { name: 'Infiltration', encoded: encode(LARGE_ARMY, 1, 2) },
+  { name: 'Intransitive', encoded: encode(CORNER_ARMY, 1, 3) },
 ];
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -106,3 +106,18 @@ for (const entry of suite) {
   );
 }
 console.log(`WASM mean depth ${(totalDepth / suite.length).toFixed(3)}`);
+
+// Exercise lazy table construction and signed distance conversion in WASM,
+// including a blockade that loses because its only defender must move.
+for (const [name, rows, score] of [
+  ['equal-distance race', ['.........', '.........', '.........', '...r.....', '.........', '.....R...', '.........', '.........', '.........'], 29995],
+  ['forced corner departure', ['.........', '.........', '.........', '.........', '.........', '.........', '.........', '.......S.', '........s'], -29998],
+]) {
+  engine.rpsfish_search_clear();
+  engine.rpsfish_history_clear();
+  engine.rpsfish_analyze(...encode(rows, 0, 3), 1, 5000, 1000, 1);
+  if (engine.rpsfish_analysis_score() !== score || engine.rpsfish_analysis_count() === 0) {
+    throw new Error(`${name}: expected ${score}, got ${engine.rpsfish_analysis_score()}`);
+  }
+  console.log(`  tablebase ${name}: ${score} pass`);
+}
