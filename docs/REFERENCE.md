@@ -89,6 +89,12 @@ Build the browser engine and copy it into the website's public assets:
 ./scripts/build_web.sh
 ```
 
+It stages the wasm into `../frontend/public/rpsfish`, which assumes the website
+is checked out beside this repository. Set `RPSFISH_WEB_DIR` when it is not —
+the website's own `deploy/deploy-engine.sh` does exactly that. Getting it wrong
+is quiet: the copy creates whatever directory it is handed, so the build reports
+success and the site goes on serving the engine it already had.
+
 Build an XCFramework for an iOS app:
 
 ```sh

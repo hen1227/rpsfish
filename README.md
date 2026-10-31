@@ -29,6 +29,13 @@ own rule behavior is checked against Go-generated parity fixtures, and every
 engine result is a proposal the server validates before it changes a real
 game.
 
+Intransitive uses type-aware safe routes to the goal, pressure from a second
+runner, and support between the three piece kinds. Corner threats receive
+forced-defense searches, and every one-piece-per-side endgame is solved
+exactly. The September 2026 update scored **88.5% at 20k nodes** and **83.4% at
+100k nodes** against the previous engine in paired games. See
+[the strategy, experiments, and validation](docs/INTRANSITIVE.md).
+
 ## What it provides
 
 - **`rpsfish`** — a diagnostic CLI: `search`, `perft`, and an `rpsi` mode that

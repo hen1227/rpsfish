@@ -1,0 +1,14 @@
+pairs=300 nodes=100000 seed=202609062 threads=4 mode=Intransitive same=false selective=true reduction=40 opening_plies=6 params=default
+completed pairs=25/300
+completed pairs=50/300
+completed pairs=75/300
+completed pairs=100/300
+completed pairs=125/300
+completed pairs=150/300
+completed pairs=175/300
+completed pairs=200/300
+completed pairs=225/300
+completed pairs=250/300
+completed pairs=275/300
+completed pairs=300/300
+games=600 W/D/L=487/27/86 score=0.8342 elo=+280.6 CI=[+247.1,+319.2] LLR=+11.266 ACCEPT pairs=[6, 4, 70, 23, 197] plies=80.9 truncated=0 time=179.0s depth=6.87/6.64 nps=5484036/8869841

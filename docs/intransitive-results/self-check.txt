@@ -1,0 +1,4 @@
+pairs=50 nodes=5000 seed=12345 threads=2 mode=Intransitive same=true selective=true reduction=40 opening_plies=6 params=
+completed pairs=25/50
+completed pairs=50/50
+games=100 W/D/L=1/98/1 score=0.5000 elo=+0.0 CI=[+0.0,+0.0] LLR=+0.000 inconclusive pairs=[0, 0, 50, 0, 0] plies=204.1 truncated=0 time=8.9s depth=3.95/3.95 nps=5855105/5860438

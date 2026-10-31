@@ -1,0 +1,194 @@
+
+running 104 tests
+test board::tests::corner_masks_are_single_squares_at_the_ends_of_the_target_rows ... ok
+test board::tests::neighbor_counts_match_board_geometry ... ok
+test board::tests::corner_shells_are_the_corner_and_its_three_approaches ... ok
+test board::tests::bulk_neighbors_match_the_square_table ... ok
+test board::tests::target_masks_are_the_outer_rows ... ok
+test board::tests::square_bits_match_the_shift_they_replace ... ok
+test board::tests::undirected_edge_count_matches_move_capacity ... ok
+test board::tests::neighborhood_is_symmetric_and_on_board ... ok
+test evaluation::tests::a_doomed_army_of_two_is_not_one_capture_from_losing ... ok
+test evaluation::tests::a_hunter_that_can_still_be_hunted_does_not_doom_its_prey ... ok
+test evaluation::tests::a_corner_race_is_measured_diagonally_rather_than_by_rank ... ok
+test evaluation::tests::a_piece_is_doomed_when_its_hunter_can_never_be_hunted_back ... ok
+test evaluation::tests::a_plug_only_seals_while_nothing_on_the_board_can_take_it ... ok
+test evaluation::tests::all_starting_evaluations_are_balanced ... ok
+test evaluation::tests::an_immortal_last_piece_is_not_an_endgame_liability ... ok
+test evaluation::tests::assignments_reject_unknown_names_and_bad_values ... ok
+test evaluation::tests::crowding_one_tile_does_not_widen_the_frontier ... ok
+test evaluation::tests::distinct_claimable_tiles_are_counted_apart_from_claiming_moves ... ok
+test evaluation::tests::doom_is_decided_per_kind_rather_than_per_side ... ok
+test evaluation::tests::geometric_advancement_measures_progress_toward_the_corner ... ok
+test evaluation::tests::haste_grows_as_the_board_fills_so_a_won_fill_gets_finished ... ok
+test evaluation::tests::haste_pays_only_the_side_that_has_already_won_the_fill ... ok
+test evaluation::tests::infiltration_rewards_forward_progress ... ok
+test evaluation::tests::local_matchups_distinguish_support_from_same_kind_company ... ok
+test evaluation::tests::parameters_round_trip_by_name_and_by_vector ... ok
+test evaluation::tests::safe_routes_allow_a_winning_arrival_on_an_attacked_goal ... ok
+test evaluation::tests::safe_routes_do_not_walk_through_friendly_pieces_or_count_one_twice ... ok
+test evaluation::tests::safe_routes_respect_the_corner_occupants_kind ... ok
+test evaluation::tests::the_claim_square_term_stays_symmetric_under_mirroring ... ok
+test evaluation::tests::the_claim_terms_stay_silent_in_modes_without_territory ... ok
+test evaluation::tests::the_corner_terms_belong_to_the_side_defending_that_corner ... ok
+test evaluation::tests::the_corner_terms_stay_out_of_the_modes_without_a_corner ... ok
+test evaluation::tests::the_endgame_race_is_the_clock_less_the_distance_to_the_hunter ... ok
+test evaluation::tests::the_endgame_race_saturates_rather_than_scaling_with_an_empty_board ... ok
+test evaluation::tests::the_majority_is_the_count_no_split_of_the_rest_can_beat ... ok
+test evaluation::tests::the_new_survival_terms_stay_symmetric_under_mirroring ... ok
+test evaluation::tests::the_opening_is_level ... ok
+test evaluation::tests::the_race_term_is_a_fraction_of_the_weight_while_the_fill_is_open ... ok
+test evaluation::tests::the_race_term_saturates_exactly_at_the_majority ... ok
+test evaluation::tests::the_tile_that_decides_the_fill_keeps_its_full_value ... ok
+test evaluation::tests::the_zero_piece_cliff_is_gated_on_the_rule_rather_than_the_mode ... ok
+test evaluation::tests::weights_actually_drive_the_score ... ok
+test model::tests::capture_cycle_is_directional ... ok
+test model::tests::predator_and_prey_invert_the_capture_cycle ... ok
+test model::tests::square_coordinates_round_trip ... ok
+test endgame::tests::an_immortal_corner_holder_can_still_be_forced_to_move ... ok
+test endgame::tests::equal_distance_races_depend_on_tempo_and_the_draw_clock ... ok
+test position::tests::cached_hash_matches_full_recomputation ... ok
+test position::tests::each_mode_reports_its_board_objective ... ok
+test position::tests::fen_keeps_territory_that_no_piece_stands_on ... ok
+test position::tests::fen_reads_the_layout_the_game_record_writes ... ok
+test position::tests::malformed_fen_is_rejected_rather_than_guessed_at ... ok
+test position::tests::fen_round_trips_through_every_starting_position ... ok
+test position::tests::mode_keys_cover_every_mode_and_separate_them ... ok
+test position::tests::null_moves_only_flip_the_side_and_round_trip_exactly ... ok
+test position::tests::rejects_overlapping_piece_boards ... ok
+test position::tests::starting_positions_match_current_go_layouts ... ok
+test position::tests::the_intransitive_wedges_are_banked_in_front_of_their_own_corners ... ok
+test rules::tests::a_corner_goal_is_tactical_and_a_rank_goal_is_not_in_the_same_place ... ok
+test rules::tests::make_unmake_restores_starting_positions_and_hashes ... ok
+test rules::tests::only_winning_piece_type_can_capture ... ok
+test rules::tests::shallow_perft_is_deterministic ... ok
+test rules::tests::standing_on_the_enemy_corner_wins_and_standing_on_your_own_does_not ... ok
+test rules::tests::starting_move_counts_are_stable ... ok
+test search::tests::a_territory_majority_without_an_immortal_piece_gets_no_bound ... ok
+test search::tests::a_goal_win_precedes_stand_pat_even_in_a_narrow_window ... ok
+test search::tests::a_no_move_node_is_scored_by_its_own_modes_rule ... ok
+test search::tests::a_permanent_territory_majority_with_an_immortal_piece_is_never_scored_as_losing ... ok
+test search::tests::a_hundred_moves_with_no_capture_is_a_draw_in_every_mode ... ok
+test search::tests::analysis_streams_only_complete_depths_with_principal_variations ... ok
+test search::tests::analysis_scores_a_third_occurrence_on_its_merits ... ok
+test search::tests::hard_node_limit_is_respected ... ok
+test search::tests::one_tile_short_of_a_majority_gets_no_bound ... ok
+test search::tests::analysis_returns_three_ranked_legal_moves ... ok
+test search::tests::an_unanswerable_corner_threat_is_a_loss_at_the_horizon ... ok
+test search::tests::cancellation_is_observed_before_search ... ok
+test search::tests::finds_immediate_annihilation_win ... ok
+test search::tests::previous_power_is_safe_for_table_sizes ... ok
+test search::tests::finds_immediate_infiltration_win ... ok
+test search::tests::partial_analysis_iteration_keeps_last_completed_update ... ok
+test search::tests::prefers_the_capture_that_makes_its_own_pieces_immortal ... ok
+test search::tests::a_restricted_root_reports_an_illegal_request ... ok
+test rules::tests::starting_perft_baselines_are_stable ... ok
+test search::tests::quiescence_searches_a_quiet_corner_plug ... ok
+test search::tests::the_reduction_table_is_monotone_in_depth_and_move_index ... ok
+test search::tests::finds_legal_starting_move_in_every_mode ... ok
+test search::tests::the_territory_bound_is_symmetric_under_mirroring ... ok
+test search::tests::territory_modes_do_not_get_the_immortality_guarantee ... ok
+test search::tests::two_territory_guarantees_cannot_hold_at_once ... ok
+test selfplay::tests::balanced_openings_are_legal_and_undecided ... ok
+test selfplay::tests::perspective_flips_only_decisive_results ... ok
+test wasm::tests::c_abi_rejects_unknown_modes_and_invalid_squares ... ok
+test wasm::tests::c_abi_versions_match_the_core ... ok
+test wasm::tests::c_abi_round_trips_every_starting_position ... ok
+test search::tests::the_search_scores_a_repeat_the_way_its_mode_does ... ok
+test search::tests::single_pv_uses_the_faster_root_search ... ok
+test search::tests::transpositions_respect_the_no_capture_clock ... ok
+test search::tests::repetition_detection_matches_a_full_path_scan ... ok
+test search::tests::a_third_known_occurrence_is_played_on ... ok
+test search::tests::a_restricted_root_leaves_no_entry_behind ... ok
+test endgame::tests::every_table_entry_agrees_with_all_legal_successors ... ok
+test selfplay::tests::self_play_is_reproducible_for_a_fixed_seed ... ok
+test search::tests::a_restricted_root_answers_about_exactly_the_requested_moves ... ok
+test selfplay::tests::every_mode_plays_a_complete_game ... ok
+
+test result: ok. 104 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test tests::a_taper_reports_the_band_covering_a_ply ... ok
+test tests::a_taper_file_overrides_the_built_in_shape ... ok
+test tests::a_line_reads_the_archives_moves_and_ignores_move_numbers ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 21 tests
+test tests::a_book_flag_is_parsed_onto_the_session ... ok
+test tests::a_time_budget_always_leaves_room_to_answer ... ok
+test tests::a_mistyped_rpsi_flag_is_refused_rather_than_ignored ... ok
+test tests::deep_preset_remains_bounded_and_can_be_overridden ... ok
+test tests::help_and_bad_arguments_are_handled ... ok
+test tests::replaying_an_illegal_line_names_the_move_that_failed ... ok
+test tests::replaying_a_line_records_every_position_before_it ... ok
+test tests::scores_are_written_the_way_rpsi_reads_them ... ok
+test tests::weights_can_be_overridden_on_the_command_line ... ok
+test tests::a_position_command_survives_a_malformed_fen ... ok
+test tests::a_missing_book_leaves_the_engine_searching ... ok
+test tests::a_measured_search_speed_replaces_the_assumed_one ... ok
+test tests::go_without_any_budget_still_terminates ... ok
+test tests::rpsi_accepts_an_intransitive_position ... ok
+test tests::go_reads_the_clock_belonging_to_the_side_to_move ... ok
+test tests::a_book_gives_way_to_a_search_that_can_afford_more_nodes ... ok
+test tests::a_book_record_is_played_without_searching ... ok
+test tests::a_rebuilt_book_is_picked_up_without_a_restart ... ok
+test tests::a_second_game_in_one_mode_does_not_reload_an_unchanged_book ... ok
+test tests::a_book_is_ignored_where_it_would_be_worse_than_thinking ... ok
+test tests::an_online_bot_is_configured_by_its_command_line ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+
+running 22 tests
+test a_proven_result_stays_ordered_by_how_long_it_takes ... ok
+test a_wider_record_contributes_its_extra_moves_to_a_deeper_one ... ok
+test a_principal_line_reads_in_the_coordinates_of_the_board_it_starts_from ... ok
+test backing_up_a_cycle_terminates_and_cuts_it_by_the_modes_rule ... ok
+test a_web_export_is_a_bounded_real_coordinate_tree ... ok
+test a_graph_export_is_a_closed_real_coordinate_graph ... ok
+test folding_by_files_merges_mirrored_first_moves ... ok
+test refreshing_requeues_a_record_that_no_longer_meets_its_ply_budget ... ok
+test the_frontier_ranks_the_best_line_first_and_deepest ... ok
+test values_come_from_expanded_children_and_fall_back_to_the_parents_score ... ok
+test the_frontier_stops_once_it_has_the_positions_it_was_asked_for ... ok
+test a_certified_opening_runs_while_one_reply_is_strictly_best ... ok
+test a_book_refuses_records_made_under_different_weights ... ok
+test a_deeper_record_supersedes_a_shallower_one ... ok
+test a_book_round_trips_through_its_log ... ok
+test a_forced_result_is_not_an_opening ... ok
+test a_graph_export_carries_the_certified_openings ... ok
+test the_ply_cap_is_reported_as_its_own_reason ... ok
+test a_shallow_position_ends_a_certified_line ... ok
+test certification_stops_where_the_engine_is_indifferent ... ok
+test an_uncertain_book_certifies_nothing_rather_than_guessing ... ok
+test a_log_truncated_mid_write_keeps_everything_before_it ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 14 tests
+test square_and_move_notation_round_trips ... ok
+test the_infiltration_start_is_invariant_under_reversing_files_only ... ok
+test mirroring_is_an_involution_that_preserves_play ... ok
+test evaluation_is_invariant_under_colour_and_board_mirroring ... ok
+test immortality_is_monotone_along_every_playout ... ok
+test perft_agrees_across_the_symmetry_group ... ok
+test the_symmetry_group_preserves_play_and_evaluation ... ok
+test a_no_move_position_is_adjudicated_by_its_own_modes_rule ... ok
+test move_generation_agrees_with_single_move_legality ... ok
+test canonicalization_picks_one_representative_for_a_whole_class ... ok
+test analysis_only_returns_legal_moves_from_random_positions ... ok
+test make_and_unmake_restore_every_field_along_random_playouts ... ok
+test reduction_scale_orders_search_effort ... ok
+test selective_search_agrees_with_exhaustive_search_on_forced_positions ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.26s
+

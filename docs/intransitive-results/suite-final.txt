@@ -1,0 +1,16 @@
+suite: 9 positions
+budget: 20000 nodes/position, depth cap 64
+
+position                           want     static     search  depth result
+wrong-file-runner                  blue      -175         B#4     64 pass
+sealed-corner                      blue      -450         B#4     10 pass
+plug-is-not-a-seal                  red         1!        R#3     23 pass
+scissors-answers-paper              red       124         R#1     64 pass
+rock-cannot                        blue      -278         B#4     64 pass
+rock-cannot-blue-to-move           blue      -278         B#1     64 pass
+one-tempo-race-red                  red         0!        R#5     64 pass
+one-tempo-race-blue                blue         0!        B#5     64 pass
+sealed-plug-must-move              blue       127!        B#2     64 pass
+
+V6: 9/9
+search 9/9 understood, 9/9 correct sign; static 5/9 understood

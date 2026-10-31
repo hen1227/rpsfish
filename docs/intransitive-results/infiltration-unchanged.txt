@@ -1,0 +1,4 @@
+pairs=50 nodes=20000 seed=202609066 threads=4 mode=Infiltration same=false selective=true reduction=40 opening_plies=6 params=default
+completed pairs=25/50
+completed pairs=50/50
+games=100 W/D/L=50/0/50 score=0.5000 elo=+0.0 CI=[+0.0,+0.0] LLR=+0.000 inconclusive pairs=[0, 0, 50, 0, 0] plies=37.7 truncated=0 time=3.4s depth=6.71/6.71 nps=5661965/5786412

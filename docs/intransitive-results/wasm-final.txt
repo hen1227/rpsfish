@@ -1,0 +1,7 @@
+abi 4 rules 3 size 112.4KiB
+  Total War     depth  6  seldepth   7  nodes      20000    1827374 n/s  11ms  stop 1
+  Infiltration  depth  6  seldepth   9  nodes      20000    2997508 n/s  7ms  stop 1
+  Intransitive  depth  4  seldepth   7  nodes      20000    2599048 n/s  8ms  stop 1
+WASM mean depth 5.333
+  tablebase equal-distance race: 29995 pass
+  tablebase forced corner departure: -29998 pass

@@ -1,0 +1,4 @@
+pairs=50 nodes=20000 seed=202609066 threads=4 mode=Total War same=false selective=true reduction=40 opening_plies=6 params=default
+completed pairs=25/50
+completed pairs=50/50
+games=100 W/D/L=45/10/45 score=0.5000 elo=+0.0 CI=[+0.0,+0.0] LLR=+0.000 inconclusive pairs=[0, 0, 50, 0, 0] plies=202.1 truncated=0 time=17.7s depth=8.87/8.87 nps=5970187/5985902
